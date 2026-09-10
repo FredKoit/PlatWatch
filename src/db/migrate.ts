@@ -133,6 +133,32 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 5,
+    name: "flag alerts priced off an inflated ask book",
+    up(db) {
+      // Sell-side alerts used to be judged against the median of standing ASKS,
+      // which sellers can set to anything. An item asking 60p while it trades at
+      // 14.5p produced "bargains" that were well above market. detect() now
+      // takes the lower of the ask median and the traded median.
+      //
+      // Rows written before that are flagged rather than deleted: the alert was
+      // really shown, and hiding it would misrepresent what the tool did.
+      if (!tableExists(db, "alert") || !tableExists(db, "stat_summary")) return;
+      db.exec(`
+        UPDATE alert SET suspicious = 1
+         WHERE kind = 'underpriced_sell'
+           AND suspicious = 0
+           AND EXISTS (
+             SELECT 1 FROM stat_summary ss
+              WHERE ss.item_id = alert.item_id
+                AND ss.variant = alert.variant
+                AND ss.median_7d IS NOT NULL
+                AND alert.reference > ss.median_7d * 3
+           )
+      `);
+    },
+  },
 ];
 
 export interface MigrationResult {

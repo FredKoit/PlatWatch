@@ -48,8 +48,9 @@ const order = (
 test("a sell well under fair value fires, with a pasteable whisper", () => {
   const a = detect(order(), baseline(), DEFAULT_ALERT_POLICY, NOW)!;
   assert.equal(a.kind, "underpriced_sell");
-  assert.equal(a.reference, 66);
-  assert.equal(a.profit, 26);
+  // Asks median 66, traded median 64 — priced off the lower, safer of the two.
+  assert.equal(a.reference, 64);
+  assert.equal(a.profit, 24);
   assert.equal(
     a.whisper,
     '/w Tenno123 Hi! I want to buy: "Rhino Prime Set" for 40 platinum. (warframe.market)',
@@ -115,7 +116,7 @@ test("an absurd discount fires but is flagged suspicious", () => {
   // 5p against a 66p median: more often a typo or bait than a bargain.
   const a = detect(order({ platinum: 5 }), baseline(), DEFAULT_ALERT_POLICY, NOW)!;
   assert.equal(a.suspicious, true, "worth seeing, worth doubting");
-  assert.equal(a.profit, 61);
+  assert.equal(a.profit, 59, "5p against the 64p traded median");
 });
 
 test("an invisible order is skipped", () => {
@@ -220,4 +221,42 @@ test("with no traded median there is nothing to sanity-check against", () => {
   const b = baseline({ lowSell: 1, median7d: null });
   const a = detect(order({ type: "buy", platinum: 31 }), b, DEFAULT_ALERT_POLICY, NOW)!;
   assert.equal(a.suspicious, false, "absence of evidence is not evidence of fraud");
+});
+
+test("an inflated ask book cannot manufacture a bargain", () => {
+  // Nagantaka Prime Blueprint: asks median 60p, actually trades at 14.5p.
+  // A 35p listing is not a bargain — it is well above what anyone pays.
+  const inflated = baseline({
+    name: "Nagantaka Prime Blueprint",
+    fairValue: 60,
+    median7d: 14.5,
+    volume48h: 30,
+  });
+  assert.equal(
+    detect(order({ platinum: 35 }), inflated, DEFAULT_ALERT_POLICY, NOW),
+    null,
+    "sellers can ask anything; only completed trades say what it is worth",
+  );
+});
+
+test("a genuinely cheap listing still fires, priced off trades", () => {
+  const inflated = baseline({ fairValue: 60, median7d: 14.5, volume48h: 30 });
+  const a = detect(order({ platinum: 3 }), inflated, DEFAULT_ALERT_POLICY, NOW)!;
+  assert.equal(a.reference, 14.5, "judged against what it trades at, not the ask book");
+  assert.equal(a.profit, 11.5);
+  assert.equal(a.suspicious, true, "and the detached book is itself a warning");
+});
+
+test("a healthy book uses the lower of the two, conservatively", () => {
+  const healthy = baseline({ fairValue: 66, median7d: 62 });
+  const a = detect(order({ platinum: 40 }), healthy, DEFAULT_ALERT_POLICY, NOW)!;
+  assert.equal(a.reference, 62, "the traded median is the safer of the two");
+  assert.equal(a.profit, 22);
+  assert.equal(a.suspicious, false);
+});
+
+test("with no trade history the ask median is all there is", () => {
+  const b = baseline({ fairValue: 66, median7d: null });
+  const a = detect(order({ platinum: 40 }), b, DEFAULT_ALERT_POLICY, NOW)!;
+  assert.equal(a.reference, 66);
 });

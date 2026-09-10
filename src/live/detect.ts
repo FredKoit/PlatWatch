@@ -154,9 +154,19 @@ export function detect(
   };
 
   if (order.type === "sell") {
-    // Prefer the ask-side median; fall back to what the variant actually traded
-    // at. For a rank-10 mod there are no asks in /top, so history is all we have.
-    const reference = baseline.fairValue ?? baseline.median7d;
+    // Two candidate reference prices, and they measure different things.
+    // fairValue is the median of standing ASKS — what sellers hope for, which
+    // they can set to anything. median7d is the median of COMPLETED trades —
+    // what buyers actually paid.
+    //
+    // Take the lower. An item whose book asks 60p while it trades at 14.5p has
+    // an ask-median that is fiction, and calling a 35p listing "underpriced"
+    // against it invites buying well above market. Being conservative here only
+    // ever costs a missed alert; being optimistic costs platinum.
+    const asked = baseline.fairValue;
+    const traded = baseline.median7d ?? null;
+    const reference =
+      asked !== null && traded !== null ? Math.min(asked, traded) : (asked ?? traded);
     if (reference === null) return null;
     if (order.platinum > reference * policy.sellDiscount) return null;
 
@@ -169,7 +179,11 @@ export function detect(
       reference,
       profit,
       profitPct: profit / reference,
-      suspicious: order.platinum < reference * policy.suspiciousDiscount,
+      // Either the listing is far under the reference, or the book itself has
+      // detached from what the item trades at.
+      suspicious:
+        order.platinum < reference * policy.suspiciousDiscount ||
+        (asked !== null && traded !== null && asked > traded * 3),
       whisper: whisperFor(order.user.ingameName, baseline.name, order.platinum, "buy"),
     };
   }

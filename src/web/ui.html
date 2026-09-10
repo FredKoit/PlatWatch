@@ -72,6 +72,16 @@
   .age-fresh{color:var(--ink-3)} .age-old{color:var(--warn)}
   .live{color:var(--good); font-size:11px}
   .ghost{color:var(--warn); font-size:11px; margin-left:6px}
+  .play{font-size:11px; color:var(--ink-3); white-space:nowrap}
+  .play b{color:var(--cyan); font-weight:600}
+  dialog .parts{padding:14px 18px; display:grid; gap:10px; max-width:430px}
+  dialog .part{
+    display:flex; align-items:center; gap:10px; justify-content:space-between;
+    border-bottom:1px solid var(--line-soft, #242e38); padding-bottom:9px;
+  }
+  dialog .part:last-child{border-bottom:0; padding-bottom:0}
+  dialog .part .pn{font-size:13px}
+  dialog .part .pq{color:var(--gold); font-weight:600}
 
   button.act{
     background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line);
@@ -151,12 +161,14 @@
     Prices come from the last full sweep unless marked <span class="live">live</span>, which means
     the feed refreshed them within the last 15 minutes. Treat the rest as a hypothesis and confirm in game.
     A <span class="ghost">ghost</span> tag means that ask has been cheapest for several sweeps without selling.
-    Copying a whisper logs it, which is what builds the reply-rate column.
+    <b>Spread</b> rows say <span class="play">post <b>46</b> / <b>59</b></span> — place both orders and wait;
+    the offer button lowballs the cheapest seller at your buy price rather than paying their ask.
+    <b>Set</b> rows list the components to buy. Copying any whisper logs it, which builds the reply-rate column.
   </p>
   <div class="wrap"><table id="ops"><thead><tr>
     <th></th><th>Item</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">Margin</th>
     <th class="r">Vol 48h</th><th class="r">Book</th><th class="r">Score</th><th class="r">Ret</th>
-    <th>Counterparty</th><th>Whisper</th>
+    <th>Counterparty</th><th>How to play it</th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -273,6 +285,24 @@ function rateCell(c) {
   return `<span class="who">${esc(c.ingameName)}</span> <span class="rate ${cls}">${pct}% of ${c.sent}</span>`;
 }
 
+/**
+ * What to actually do, which differs by strategy.
+ *
+ * A spread is market making: post a bid and an ask, and wait. Offering the
+ * seller their asking price and then undercutting it loses money, so the only
+ * whisper here is a lowball at the model's own buy price.
+ *
+ * Set arbitrage takes component asks, so the whispers are per part.
+ */
+function playCell(r) {
+  if (r.playKind === "buy-parts") {
+    const n = r.parts ? r.parts.length : 0;
+    return `<button class="act" data-act="parts">buy ${n} parts</button>`;
+  }
+  return `<span class="play">post <b>${r.postBuyAt}</b> / <b>${r.postSellAt}</b></span>
+          ${r.lowballWhisper ? `<button class="act" data-act="lowball" title="offer the cheapest seller ${r.postBuyAt}p — below their ask">offer ${r.postBuyAt}p</button>` : ""}`;
+}
+
 function renderOps() {
   const q = $("#filter").value.trim().toLowerCase();
   const shown = q ? rows.filter((r) => r.name.toLowerCase().includes(q)) : rows;
@@ -300,7 +330,7 @@ function renderOps() {
       <td class="r num">${r.score}</td>
       <td class="r num">${Math.round(r.marginPct * 100)}%</td>
       <td>${rateCell(target)}${r.ghostSweeps > 1 ? `<span class="ghost" title="cheapest ask, unsold across ${r.ghostSweeps} sweeps">ghost ×${r.ghostSweeps}</span>` : ""}</td>
-      <td>${r.buyWhisper ? `<button class="act" data-act="whisper">copy</button>` : "–"}
+      <td>${playCell(r)}
           <button class="act" data-act="bought" title="record that you bought this">bought</button></td>
     </tr>`;
   }).join("");
@@ -382,11 +412,12 @@ $("#ops").addEventListener("click", async (e) => {
     return;
   }
 
-  if (btn.dataset.act === "whisper" && row.seller) {
-    await copyWhisper(row.buyWhisper);
+  if (btn.dataset.act === "lowball" && row.seller) {
+    await copyWhisper(row.lowballWhisper);
     btn.textContent = "copied";
     btn.classList.add("done");
-    // Logging on copy is what makes the reply-rate column possible.
+    // Logged at the price OFFERED, not the seller's ask — the reply rate is
+    // about whether lowballs get answered, which is the useful question.
     await api("/api/whispers", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -394,13 +425,68 @@ $("#ops").addEventListener("click", async (e) => {
         itemId: row.itemId,
         userId: row.seller.userId,
         ingameName: row.seller.ingameName,
-        platinum: row.seller.platinum,
-        note: row.kind,
+        platinum: row.postBuyAt,
+        note: `${row.kind} lowball (asked ${row.seller.platinum}p)`,
       }),
     });
     loadStatus();
+    return;
+  }
+
+  if (btn.dataset.act === "parts" && row.parts) {
+    await showParts(row);
+    return;
   }
 });
+
+/** One dialog listing every component to acquire, each with its own whisper. */
+async function showParts(row) {
+  const modal = $("#modal");
+  $("#modal-title").textContent = `Assemble ${row.name} — ${row.buyAt}p of parts, sells at ${row.sellAt}p`;
+  $("#modal-fields").outerHTML = `<div class="parts" id="modal-fields">${row.parts
+    .map(
+      (p, i) => `<div class="part">
+        <span class="pn"><span class="pq">${p.qty}×</span> ${esc(p.name)}
+          <span class="hint-inline">${p.price === null ? "unpriced" : p.price + "p each"}${
+            p.seller ? " · " + esc(p.seller.ingameName) : " · no live seller"
+          }</span></span>
+        ${p.whisper ? `<button type="button" class="act" data-part="${i}">copy</button>` : ""}
+      </div>`,
+    )
+    .join("")}</div>`;
+
+  const onClick = async (e) => {
+    const b = e.target.closest("button[data-part]");
+    if (!b) return;
+    const p = row.parts[Number(b.dataset.part)];
+    await copyWhisper(p.whisper);
+    b.textContent = "copied";
+    b.classList.add("done");
+    await api("/api/whispers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        itemId: p.itemId,
+        userId: p.seller.userId,
+        ingameName: p.seller.ingameName,
+        platinum: p.seller.platinum,
+        note: `set part for ${row.name}`,
+      }),
+    });
+    loadStatus();
+  };
+  modal.addEventListener("click", onClick);
+  modal.addEventListener(
+    "close",
+    () => {
+      modal.removeEventListener("click", onClick);
+      // Restore the plain form container the shared askForm() expects.
+      $("#modal-fields").outerHTML = `<div class="fields" id="modal-fields"></div>`;
+    },
+    { once: true },
+  );
+  modal.showModal();
+}
 
 async function loadAlerts() {
   const list = await api("/api/alerts");
