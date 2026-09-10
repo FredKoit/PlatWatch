@@ -26,6 +26,7 @@ const MARKET_COLUMNS = `
   s.newest_sell_age_h AS bookAgeH,
   ss.volume_48h   AS volume48h,
   ss.volume_7d    AS volume7d,
+  ss.median_7d    AS median7d,
   ss.days_traded_30d AS daysTraded30d,
   ss.last_traded_day AS lastTradedDay
 `;

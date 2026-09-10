@@ -21,6 +21,16 @@ export interface RankingPolicy {
    * unrelated prices. Real spreads run tens of percent, not a thousand.
    */
   maxSpreadPct: number;
+  /**
+   * How far above the TRADED median you may plan to sell.
+   *
+   * The sell leg assumes you can undercut the cheapest ask and get filled. That
+   * only holds if the ask book is near where the market clears. Blaze asks 74p
+   * while trading at 47p — posting at 73p is asking half again what anyone
+   * pays, and the 31p margin is really about 5p. Sellers set asks; only
+   * completed trades say what gets bought.
+   */
+  maxSellAboveTraded: number;
   /** A book older than this is a hypothesis, not a quote. */
   maxBookAgeHours: number;
   /** History that stopped days ago describes a market that no longer exists. */
@@ -47,6 +57,7 @@ export const DEFAULT_POLICY: RankingPolicy = {
   minSellOrders: 3,
   minBuyOrders: 3,
   maxSpreadPct: 2,
+  maxSellAboveTraded: 1.5,
   maxBookAgeHours: 72,
   maxHistoryStaleDays: 2,
   minMarginPlat: 5,
@@ -76,6 +87,8 @@ export interface MarketRow {
   lastTradedDay: string | null;
   /** Set when a side of this book came from the live feed rather than the sweep. */
   liveAt?: string | null;
+  /** Median of completed trades for this variant — what actually gets paid. */
+  median7d?: number | null;
 }
 
 export interface SetInput {
@@ -182,6 +195,10 @@ export function scoreSpread(
   }
   if (marginPct > policy.maxSpreadPct) {
     spreadRejects.push(`spread ${(marginPct * 100).toFixed(0)}% — not one market`);
+  }
+  const traded = row.median7d ?? null;
+  if (traded !== null && traded > 0 && sellAt > traded * policy.maxSellAboveTraded) {
+    spreadRejects.push(`would ask ${sellAt}p where it trades at ${traded.toFixed(0)}p`);
   }
 
   return {

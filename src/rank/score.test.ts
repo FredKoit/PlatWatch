@@ -25,6 +25,7 @@ const row = (over: Partial<MarketRow> = {}): MarketRow => ({
   bookAgeH: 2,
   volume48h: 100,
   volume7d: 400,
+  median7d: 62,
   daysTraded30d: 30,
   lastTradedDay: today,
   ...over,
@@ -202,7 +203,15 @@ test("an ordinary spread still passes both new checks", () => {
 
 test("a trade needing more capital than you have is held back", () => {
   // Ancient Fusion Core shape: a real 400p edge that ties up 500p.
-  const rich = row({ name: "Ancient Fusion Core", lowSell: 900, highBuy: 500, volume48h: 20 });
+  // median7d set to match the price level; the fixture default of 62p would
+  // make a 900p item look like an ask book detached from reality.
+  const rich = row({
+    name: "Ancient Fusion Core",
+    lowSell: 900,
+    highBuy: 500,
+    median7d: 700,
+    volume48h: 20,
+  });
   assert.deepEqual(scoreSpread(rich, DEFAULT_POLICY, NOW)!.rejects, [], "unlimited by default");
 
   const capped = scoreSpread(rich, { ...DEFAULT_POLICY, maxBuyAt: 200 }, NOW)!;
@@ -220,7 +229,7 @@ test("sorting by return prefers the cheaper trade with the same edge", () => {
     NOW,
   )!;
   const dear = scoreSpread(
-    row({ itemId: "dear", lowSell: 620, highBuy: 500, volume48h: 100 }),
+    row({ itemId: "dear", lowSell: 620, highBuy: 500, median7d: 600, volume48h: 100 }),
     DEFAULT_POLICY,
     NOW,
   )!;
@@ -239,4 +248,30 @@ test("live freshness survives scoring", () => {
 
   const fromSweep = scoreSpread(row(), DEFAULT_POLICY, NOW)!;
   assert.equal(fromSweep.liveAt, null);
+});
+
+test("a sell leg far above where the market clears is rejected", () => {
+  // Blaze: asks 74p, trades at 47p. Posting at 73p asks half again what anyone
+  // pays, so the 31p margin is closer to 5p and only if you wait indefinitely.
+  const o = scoreSpread(
+    row({ name: "Blaze", lowSell: 74, highBuy: 41, median7d: 47, volume48h: 30 }),
+    DEFAULT_POLICY,
+    NOW,
+  )!;
+  assert.equal(o.margin, 31, "the arithmetic margin is real enough");
+  assert.ok(
+    o.rejects.some((r) => r.includes("where it trades at")),
+    `expected a traded-median rejection, got ${JSON.stringify(o.rejects)}`,
+  );
+  assert.deepEqual(rank([o]), []);
+});
+
+test("a sell leg near the traded price passes", () => {
+  const o = scoreSpread(row({ lowSell: 60, highBuy: 45, median7d: 58 }), DEFAULT_POLICY, NOW)!;
+  assert.deepEqual(o.rejects, [], "asking 59 where it trades at 58 is ordinary");
+});
+
+test("with no trade history the sell leg cannot be second-guessed", () => {
+  const o = scoreSpread(row({ median7d: null }), DEFAULT_POLICY, NOW)!;
+  assert.deepEqual(o.rejects, []);
 });
