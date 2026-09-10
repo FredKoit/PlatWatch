@@ -13,6 +13,7 @@ import {
   status,
 } from "./api";
 import { closeTrade, deleteTrade, listTrades, openTrade, pnl } from "../trade/journal";
+import { DEFAULT_DUCAT_POLICY, ducatOpportunities, planSpend } from "../rank/ducats";
 
 /**
  * A local, dependency-free HTTP server.
@@ -78,6 +79,21 @@ export function createApp(db: Db) {
             watchedOnly: url.searchParams.get("watched") === "1",
           }),
         );
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/ducats") {
+        const capital = url.searchParams.get("maxBuyAt");
+        const budget = Number(url.searchParams.get("budget") ?? 0);
+        const rows = ducatOpportunities(db, {
+          ...DEFAULT_DUCAT_POLICY,
+          ...(capital && Number(capital) > 0 ? { maxBuyAt: Number(capital) } : {}),
+        });
+        json(res, {
+          rows: rows.slice(0, Number(url.searchParams.get("limit") ?? 100)),
+          total: rows.length,
+          plan: budget > 0 ? planSpend(rows, budget) : null,
+        });
         return;
       }
 

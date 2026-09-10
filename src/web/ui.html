@@ -134,6 +134,7 @@
   <button data-tab="alerts" aria-selected="false">Live alerts</button>
   <button data-tab="log" aria-selected="false">Whisper log</button>
   <button data-tab="trades" aria-selected="false">Trades &amp; P&amp;L</button>
+  <button data-tab="ducats" aria-selected="false">Ducats</button>
 </nav>
 
 <section id="tab-ops">
@@ -187,6 +188,31 @@
   </p>
   <div class="wrap"><table id="log"><thead><tr>
     <th>Sent</th><th>Item</th><th>Player</th><th class="r">Plat</th><th>Outcome</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section id="tab-ducats" hidden>
+  <div class="bar">
+    <label class="field"><span>Budget</span>
+      <input type="number" id="duc-budget" min="0" step="10" value="200">
+      <span class="unit">p to spend</span>
+    </label>
+    <label class="field"><span>Max per item</span>
+      <input type="number" id="duc-cap" min="0" step="1" placeholder="any">
+      <span class="unit">p</span>
+    </label>
+    <button class="act" id="duc-refresh">refresh</button>
+    <span class="stat" id="duc-plan"></span>
+  </div>
+  <p class="hint">
+    Prime parts convert to a fixed number of ducats whatever you paid, so only the
+    purchase price moves the rate. The blended figure is what a whole shopping run
+    actually returns — the top row alone always flatters it, because the cheapest
+    items are a few orders deep.
+  </p>
+  <div class="wrap"><table id="ducats"><thead><tr>
+    <th>Item</th><th class="r">Ducats</th><th class="r">Cost</th><th class="r">Per plat</th>
+    <th class="r">Vol 48h</th><th class="r">Trades at</th><th class="r">Book</th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -656,6 +682,38 @@ $("#trades").addEventListener("click", async (e) => {
   loadTrades();
 });
 
+async function loadDucats() {
+  const params = new URLSearchParams();
+  const budget = $("#duc-budget").value;
+  const cap = $("#duc-cap").value;
+  if (budget) params.set("budget", budget);
+  if (cap) params.set("maxBuyAt", cap);
+  const { rows, total, plan } = await api("/api/ducats?" + params);
+
+  $("#duc-plan").innerHTML = plan
+    ? `<b>${plan.ducats.toLocaleString()}</b> ducats from <b>${plan.items}</b> items
+       for <b>${plan.spent}p</b> — <b>${plan.ducatsPerPlat}</b> per plat blended
+       <span class="rate none">(${total} conversions qualify)</span>`
+    : `<span class="rate none">${total} conversions qualify</span>`;
+
+  $("#ducats tbody").innerHTML = rows.length
+    ? rows.map((r) => `<tr>
+        <td><span class="name">${esc(r.name)}</span>${r.liveAt ? ' <span class="live">live</span>' : ""}</td>
+        <td class="r num">${r.ducats}</td>
+        <td class="r num">${r.buyAt}p</td>
+        <td class="r num margin">${r.ducatsPerPlat}</td>
+        <td class="r num">${r.volume48h}</td>
+        <td class="r num">${r.tradedMedian === null ? "–" : r.tradedMedian.toFixed(1) + "p"}</td>
+        <td class="r num ${(r.bookAgeH ?? 0) > 24 ? "age-old" : "age-fresh"}">${
+          r.bookAgeH === null ? "–" : r.bookAgeH.toFixed(0) + "h"}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="7" class="empty">Nothing clears the rate floor right now.</td></tr>`;
+}
+
+$("#duc-refresh").addEventListener("click", loadDucats);
+$("#duc-budget").addEventListener("change", loadDucats);
+$("#duc-cap").addEventListener("change", loadDucats);
+
 async function loadStatus() {
   const s = await api("/api/status");
   $("#s-age").textContent = s.sweepAgeH === null ? "none" : s.sweepAgeH + "h ago";
@@ -672,12 +730,13 @@ document.querySelector("nav").addEventListener("click", (e) => {
   for (const b of document.querySelectorAll("nav button")) {
     b.setAttribute("aria-selected", String(b === btn));
   }
-  for (const id of ["ops", "alerts", "log", "trades"]) {
+  for (const id of ["ops", "alerts", "log", "trades", "ducats"]) {
     document.getElementById("tab-" + id).hidden = id !== btn.dataset.tab;
   }
   if (btn.dataset.tab === "alerts") loadAlerts();
   if (btn.dataset.tab === "log") loadLog();
   if (btn.dataset.tab === "trades") loadTrades();
+  if (btn.dataset.tab === "ducats") loadDucats();
 });
 
 $("#kind").addEventListener("change", loadOps);
