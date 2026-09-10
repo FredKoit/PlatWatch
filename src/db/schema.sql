@@ -1,4 +1,4 @@
--- FrameTax schema.
+-- PlatWatch schema.
 --
 -- Identity is the warframe.market item id, never the slug: slugs have aliases
 -- (`mirage_prime_systems` addresses `mirage_prime_systems_blueprint`), so a

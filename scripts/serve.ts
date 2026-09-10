@@ -27,7 +27,7 @@ const controller = new AbortController();
 
 const server = createApp(db);
 server.listen(port, "127.0.0.1", () => {
-  console.log(`FrameTax UI  →  http://127.0.0.1:${port}`);
+  console.log(`PlatWatch UI  →  http://127.0.0.1:${port}`);
   console.log("  loopback only · Ctrl-C to stop");
 });
 

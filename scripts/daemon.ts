@@ -1,5 +1,5 @@
 /**
- * FrameTax daemon — the whole system in one process.
+ * PlatWatch daemon — the whole system in one process.
  *
  *   tsx scripts/daemon.ts
  *   tsx scripts/daemon.ts --port 8080 --poll 90
@@ -168,7 +168,7 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   // Without this an EADDRINUSE takes the whole daemon down as an unhandled
   // 'error' event, losing the scheduler and the sniper along with the UI.
   if (err.code === "EADDRINUSE") {
-    log("ui", `port ${port} is already in use — is another FrameTax running?`);
+    log("ui", `port ${port} is already in use — is another PlatWatch running?`);
     log("ui", `continuing without the web UI; use --port to pick another`);
     return;
   }

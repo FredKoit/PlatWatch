@@ -9,7 +9,7 @@ export type Db = Database.Database;
 
 const SCHEMA_PATH = join(dirname(fileURLToPath(import.meta.url)), "schema.sql");
 
-export const DEFAULT_DB_PATH = join(CACHE_DIR, "frametax.db");
+export const DEFAULT_DB_PATH = join(CACHE_DIR, "platwatch.db");
 
 /** Open (creating if needed) and bring the schema up to date. */
 export function openDb(path: string = DEFAULT_DB_PATH): Db {

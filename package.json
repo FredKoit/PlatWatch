@@ -1,9 +1,9 @@
 {
-  "name": "frametax",
+  "name": "platwatch",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Warframe platinum trading scanner (PC)",
+  "description": "PlatWatch — Warframe platinum trading scanner (PC)",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",

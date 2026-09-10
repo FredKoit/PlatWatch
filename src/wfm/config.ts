@@ -24,7 +24,7 @@ export const LANGUAGE = "en" as const;
  * anonymous scraper is the first thing an operator blocks.
  */
 export const USER_AGENT =
-  "FrameTax/0.1 (personal trading scanner; +https://github.com/local/frametax)";
+  "PlatWatch/0.1 (personal trading scanner; +https://github.com/local/platwatch)";
 
 /**
  * Requests per second across the whole process. The documented ceiling is 3/s.
