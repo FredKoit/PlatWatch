@@ -159,3 +159,33 @@ test("an empty journal reports nothing rather than dividing by zero", () => {
   assert.deepEqual(p.bySource, []);
   db.close();
 });
+
+test("a sell price identical to the prediction is counted, not trusted", () => {
+  const db = seeded();
+  // Logged while the form pre-filled the sell field with the prediction: the
+  // ratio is 1.00 by construction rather than by discovery.
+  const rigged = openTrade(db, {
+    itemId: "rhino",
+    buyPrice: 45,
+    expectedSell: 65,
+    expectedMargin: 20,
+    source: "spread",
+  });
+  closeTrade(db, rigged, { sellPrice: 65 });
+
+  // Entered by hand, landing somewhere other than the prediction.
+  const real = openTrade(db, {
+    itemId: "vectis",
+    buyPrice: 100,
+    expectedSell: 130,
+    expectedMargin: 30,
+    source: "spread",
+  });
+  closeTrade(db, real, { sellPrice: 118 });
+
+  const c = pnl(db).bySource.find((x) => x.source === "spread")!;
+  assert.equal(c.closed, 2);
+  assert.equal(c.exactMatches, 1, "half this sample cannot corroborate the ratio");
+  assert.equal(c.expected, 25);
+  assert.equal(c.actual, 19, "(20 + 18) / 2");
+});

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FrameTax</title>
+<title>PlatWatch</title>
 <style>
   :root{
     --bg:#0f1319; --panel:#161c24; --panel-2:#1d242e; --line:#2a333f;
@@ -99,6 +99,8 @@
     border-radius:4px; padding:7px 9px; font:inherit; font-size:14px;
   }
   dialog input:focus-visible{outline:2px solid var(--gold); outline-offset:1px}
+  dialog .hint-inline{font-size:11px; color:var(--ink-3); font-weight:400}
+  dialog .warn-inline{font-size:11px; color:var(--bad); min-height:14px}
   dialog menu{
     margin:0; padding:12px 18px; border-top:1px solid var(--line);
     display:flex; gap:8px; justify-content:flex-end;
@@ -108,7 +110,7 @@
 <body>
 
 <header>
-  <h1>FrameTax</h1>
+  <h1>PlatWatch</h1>
   <span class="stat">sweep <b id="s-age">–</b></span>
   <span class="stat"><b id="s-markets">–</b> markets</span>
   <span class="stat"><b id="s-orders">–</b> orders tracked</span>
@@ -196,7 +198,7 @@
   </p>
   <div class="wrap"><table id="calib"><thead><tr>
     <th>Strategy</th><th class="r">Closed</th><th class="r">Predicted</th>
-    <th class="r">Realised</th><th class="r">Ratio</th>
+    <th class="r">Realised</th><th class="r">Ratio</th><th>Confidence</th>
   </tr></thead><tbody></tbody></table></div>
   <div class="wrap"><table id="trades"><thead><tr>
     <th>Item</th><th class="r">Qty</th><th class="r">Bought</th><th class="r">Sold</th>
@@ -229,16 +231,34 @@ function askForm(title, fields) {
   $("#modal-fields").innerHTML = fields.map((f) => `
     <label>${esc(f.label)}
       <input name="${esc(f.name)}" type="${f.type || "text"}"
-             value="${esc(f.value ?? "")}" ${f.type === "number" ? 'step="1" min="0"' : ""}>
-    </label>`).join("");
+             value="${esc(f.value ?? "")}" ${f.type === "number" ? 'step="1" min="0"' : ""}
+             ${f.required ? "data-required=\"1\"" : ""}>
+      ${f.hint ? `<span class="hint-inline">${esc(f.hint)}</span>` : ""}
+    </label>`).join("") + `<span class="warn-inline" id="modal-warn"></span>`;
 
   return new Promise((resolve) => {
+    const form = $("#modal-form");
+
+    // A required field left blank would otherwise submit as NaN and record a
+    // meaningless price. Block it here rather than storing nonsense.
+    const onSubmit = (e) => {
+      if (e.submitter?.value !== "ok") return;
+      const missing = [...form.querySelectorAll("input[data-required]")].filter(
+        (i) => i.value.trim() === "",
+      );
+      if (missing.length) {
+        e.preventDefault();
+        $("#modal-warn").textContent = "Enter a value — this one is not guessed for you.";
+        missing[0].focus();
+      }
+    };
     const onClose = () => {
       modal.removeEventListener("close", onClose);
+      form.removeEventListener("submit", onSubmit);
       if (modal.returnValue !== "ok") return resolve(null);
-      const data = new FormData($("#modal-form"));
-      resolve(Object.fromEntries([...data.entries()]));
+      resolve(Object.fromEntries([...new FormData(form).entries()]));
     };
+    form.addEventListener("submit", onSubmit);
     modal.addEventListener("close", onClose);
     modal.showModal();
     $("#modal-fields input")?.focus();
@@ -328,8 +348,17 @@ $("#ops").addEventListener("click", async (e) => {
 
   if (btn.dataset.act === "bought") {
     const form = await askForm(`Bought ${row.name}`, [
-      { name: "paid", label: "Paid per unit (platinum)", type: "number", value: row.buyAt },
-      { name: "qty", label: "Quantity", type: "number", value: 1 },
+      {
+        name: "paid",
+        label: "Paid per unit (platinum)",
+        type: "number",
+        value: row.buyAt,
+        required: true,
+        hint:
+          `model assumed ${row.buyAt}p` +
+          (row.seller ? `, cheapest live ask is ${row.seller.platinum}p` : ""),
+      },
+      { name: "qty", label: "Quantity", type: "number", value: 1, required: true },
     ]);
     if (!form) return;
     const paid = form.paid;
@@ -460,15 +489,24 @@ async function loadTrades() {
     ${p.medianHoldH === null ? "" : `<span class="stat">median hold <b>${p.medianHoldH}h</b></span>`}`;
 
   $("#calib tbody").innerHTML = p.bySource.length
-    ? p.bySource.map((c) => `<tr>
+    ? p.bySource.map((c) => {
+        const thin = c.closed < 20;
+        const rigged = c.exactMatches > 0;
+        const notes = [];
+        if (rigged) notes.push(`${c.exactMatches} sold at exactly the predicted price`);
+        if (thin) notes.push(`only ${c.closed} trade${c.closed === 1 ? "" : "s"}`);
+        return `<tr>
         <td class="kind">${esc(c.source)}</td>
         <td class="r num">${c.closed}</td>
         <td class="r num">${c.expected === null ? "–" : c.expected.toFixed(1) + "p"}</td>
         <td class="r num">${c.actual === null ? "–" : c.actual.toFixed(1) + "p"}</td>
         <td class="r num ${c.ratio === null ? "" : c.ratio < 0.8 ? "rate bad" : "margin"}">${
           c.ratio === null ? "–" : c.ratio.toFixed(2)}</td>
-      </tr>`).join("")
-    : `<tr><td colspan="5" class="empty">No closed trades yet — calibration needs a few dozen.</td></tr>`;
+        <td class="rate ${notes.length ? "bad" : "good"}">${
+          notes.length ? esc(notes.join("; ")) : "usable"}</td>
+      </tr>`;
+      }).join("")
+    : `<tr><td colspan="6" class="empty">No closed trades yet — calibration needs a few dozen.</td></tr>`;
 
   $("#trades tbody").innerHTML = list.length
     ? list.map((t, i) => {
@@ -506,9 +544,21 @@ $("#trades").addEventListener("click", async (e) => {
     return;
   }
 
+  // Deliberately NOT pre-filled with expectedSell. This number is the one the
+  // calibration table measures the prediction against; defaulting it to the
+  // prediction makes every trade score a perfect match by construction, and the
+  // ratio becomes a statement about the form rather than about the market.
   const form = await askForm(`Sold ${t.name}`, [
-    { name: "got", label: "Sold for per unit (platinum)", type: "number",
-      value: t.expectedSell ?? t.marketNow ?? "" },
+    {
+      name: "got",
+      label: "Sold for per unit (platinum)",
+      type: "number",
+      value: "",
+      required: true,
+      hint:
+        `for reference — predicted ${t.expectedSell ?? "?"}p` +
+        (t.marketNow === null ? "" : `, market now ${t.marketNow}p`),
+    },
     { name: "to", label: "Sold to (optional)" },
   ]);
   if (!form) return;

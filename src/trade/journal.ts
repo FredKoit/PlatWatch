@@ -126,6 +126,15 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
 export interface Calibration {
   source: string;
   closed: number;
+  /**
+   * Closed trades whose sell price exactly equals the prediction.
+   *
+   * Early rows were logged when the sell field defaulted to `expectedSell`, so
+   * a perfect match could mean the form filled itself in. A genuine sale at the
+   * predicted price looks the same, so this is a caution, not a verdict — but a
+   * ratio of 1.00 built mostly from these says nothing about the market.
+   */
+  exactMatches: number;
   /** Mean margin the tool predicted per unit. */
   expected: number | null;
   /** Mean margin actually realised per unit. */
@@ -192,6 +201,9 @@ export function pnl(db: Db): Pnl {
     return {
       source,
       closed: group.length,
+      exactMatches: group.filter(
+        (t) => t.expectedSell !== null && t.sellPrice === t.expectedSell,
+      ).length,
       expected,
       actual,
       ratio: expected !== null && actual !== null && expected !== 0 ? actual / expected : null,
