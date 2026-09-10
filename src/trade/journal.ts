@@ -1,5 +1,6 @@
 import type { Db } from "../db/index";
 import { latestSweepId } from "../rank/query";
+import { sellAdvice, type SellAdvice } from "../rank/sell";
 
 /**
  * The trade journal.
@@ -91,6 +92,12 @@ export interface TradeRow {
   marketNow: number | null;
   /** Hours held, or hours open so far. */
   heldH: number;
+  /**
+   * What to list it at. Only computed for OPEN positions — the sell leg is
+   * where platinum sits waiting, and it is the only part of the trade the tool
+   * previously said nothing about.
+   */
+  advice: SellAdvice | null;
 }
 
 export function listTrades(db: Db, limit = 100): TradeRow[] {
@@ -111,7 +118,7 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
         ORDER BY t.sold_at IS NOT NULL, t.bought_at DESC
         LIMIT @limit`,
     )
-    .all({ sweep: sweepId, limit }) as Array<Omit<TradeRow, "profit" | "heldH">>;
+    .all({ sweep: sweepId, limit }) as Array<Omit<TradeRow, "profit" | "heldH" | "advice">>;
 
   const now = Date.now();
   return rows.map((r) => ({
@@ -120,6 +127,7 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
     heldH: Number(
       (((r.soldAt ? Date.parse(r.soldAt) : now) - Date.parse(r.boughtAt)) / 3_600_000).toFixed(1),
     ),
+    advice: r.soldAt === null ? sellAdvice(db, r.itemId, r.variant) : null,
   }));
 }
 

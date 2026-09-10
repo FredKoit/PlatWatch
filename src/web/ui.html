@@ -241,7 +241,7 @@
   <div class="wrap"><table id="trades"><thead><tr>
     <th>Item</th><th class="r">Qty</th><th class="r">Bought</th><th class="r">Sold</th>
     <th class="r">Market</th><th class="r">P&amp;L</th><th class="r">Held</th>
-    <th>Source</th><th>Action</th>
+    <th>List at</th><th>Action</th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -633,12 +633,39 @@ async function loadTrades() {
           <td class="r num ${open ? "" : cls(t.profit)}">${
             open ? (unreal === null ? "–" : `<span class="rate none">${sign(unreal)}p unreal.</span>`) : sign(t.profit) + "p"}</td>
           <td class="r num">${t.heldH}h</td>
-          <td class="kind">${esc(t.source)}</td>
+          <td>${adviceCell(t)}</td>
           <td>${open ? `<button class="act" data-act="sold">sold</button> ` : ""}
               <button class="act" data-act="drop" title="delete this record">✕</button></td>
         </tr>`;
       }).join("")
     : `<tr><td colspan="9" class="empty">Nothing yet. Use "bought" on an opportunity to open a position.</td></tr>`;
+}
+
+/**
+ * The sell leg, which is where the waiting actually happens.
+ *
+ * Shows both numbers because either alone misleads: undercutting the book gets
+ * you seen, the traded median is where people actually buy, and when the book
+ * has drifted above the market those are very different prices.
+ */
+function adviceCell(t) {
+  if (t.profit !== null) return `<span class="kind">${esc(t.source)}</span>`;
+  const a = t.advice;
+  if (!a || a.fairPrice === null) return `<span class="rate none">no price data</span>`;
+
+  const wait =
+    a.estimatedDaysAtFair === null
+      ? "no volume to estimate"
+      : a.queueAtFair === 0
+        ? `first in queue, ~${a.dailyVolume}/day`
+        : `${a.queueAtFair} ahead · ~${a.estimatedDaysAtFair}d`;
+
+  return `<span class="play"><b>${a.fairPrice}p</b>${
+    a.quickPrice !== null && a.quickPrice !== a.fairPrice ? ` · quick ${a.quickPrice}p` : ""
+  }${a.patientPrice !== null && a.patientPrice > a.fairPrice ? ` · patient ${a.patientPrice}p` : ""}</span>
+    <div class="hint-inline">${esc(wait)}${
+      a.bookAboveMarket ? " · book sits above the traded range" : ""
+    }</div>`;
 }
 
 $("#trades").addEventListener("click", async (e) => {
@@ -669,7 +696,8 @@ $("#trades").addEventListener("click", async (e) => {
       required: true,
       hint:
         `for reference — predicted ${t.expectedSell ?? "?"}p` +
-        (t.marketNow === null ? "" : `, market now ${t.marketNow}p`),
+        (t.marketNow === null ? "" : `, market now ${t.marketNow}p`) +
+        (t.advice && t.advice.fairPrice !== null ? `, clears around ${t.advice.fairPrice}p` : ""),
     },
     { name: "to", label: "Sold to (optional)" },
   ]);
