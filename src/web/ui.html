@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrameTax</title>
+<style>
+  :root{
+    --bg:#0f1319; --panel:#161c24; --panel-2:#1d242e; --line:#2a333f;
+    --ink:#dfe6ed; --ink-2:#95a3b1; --ink-3:#6b7885;
+    --gold:#cfa451; --cyan:#6fb6c4; --good:#6cb37c; --bad:#d9756c; --warn:#d2a44f;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+  }
+  .num{font-family:"Cascadia Mono",Consolas,monospace; font-variant-numeric:tabular-nums}
+
+  header{
+    display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel);
+  }
+  h1{margin:0; font-size:17px; letter-spacing:.06em; text-transform:uppercase; color:var(--gold)}
+  .stat{font-size:12px; color:var(--ink-3)}
+  .stat b{color:var(--ink-2); font-weight:600}
+  #stale{color:var(--warn)}
+
+  nav{display:flex; gap:2px; padding:0 20px; border-bottom:1px solid var(--line); background:var(--panel)}
+  nav button{
+    background:none; border:0; border-bottom:2px solid transparent; cursor:pointer;
+    color:var(--ink-3); padding:9px 14px; font:inherit; font-size:13px;
+  }
+  nav button[aria-selected="true"]{color:var(--gold); border-bottom-color:var(--gold)}
+  nav button:hover{color:var(--ink)}
+
+  .bar{display:flex; gap:10px; align-items:center; padding:12px 20px; flex-wrap:wrap}
+  select,input[type=search]{
+    background:var(--panel-2); color:var(--ink); border:1px solid var(--line);
+    border-radius:4px; padding:5px 8px; font:inherit; font-size:13px;
+  }
+  label.chk{display:flex; gap:6px; align-items:center; font-size:13px; color:var(--ink-2); cursor:pointer}
+
+  /* Labelled controls. A bare input with only placeholder text is invisible in
+     a row of other controls — the placeholder also disappears the moment you
+     type, taking the only explanation of the field with it. */
+  .field{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-3)}
+  .field > span{white-space:nowrap; letter-spacing:.03em; text-transform:uppercase; font-size:11px}
+  .field input[type=number]{width:88px; text-align:right}
+  .field .unit{color:var(--ink-3); margin-left:-3px}
+
+  .wrap{padding:0 20px 40px; overflow-x:auto}
+  table{border-collapse:collapse; width:100%; font-size:13px}
+  th{
+    text-align:left; padding:7px 10px; font-size:11px; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--ink-3); border-bottom:1px solid var(--line);
+    position:sticky; top:0; background:var(--bg);
+  }
+  td{padding:7px 10px; border-bottom:1px solid #1c232c; vertical-align:middle}
+  tbody tr:hover{background:var(--panel)}
+  td.r,th.r{text-align:right}
+  .name{font-weight:600}
+  .variant{
+    display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px;
+    background:var(--panel-2); color:var(--cyan); font-size:11px;
+  }
+  .kind{font-size:11px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.05em}
+  .margin{color:var(--good); font-weight:600}
+  .who{color:var(--ink-2); font-size:12px}
+  .rate{font-size:11px}
+  .rate.good{color:var(--good)} .rate.bad{color:var(--bad)} .rate.none{color:var(--ink-3)}
+  .age-fresh{color:var(--ink-3)} .age-old{color:var(--warn)}
+  .live{color:var(--good); font-size:11px}
+  .ghost{color:var(--warn); font-size:11px; margin-left:6px}
+
+  button.act{
+    background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line);
+    border-radius:4px; padding:3px 8px; font:inherit; font-size:12px; cursor:pointer;
+    white-space:nowrap;
+  }
+  button.act:hover{border-color:var(--gold); color:var(--gold)}
+  button.act.done{border-color:var(--good); color:var(--good)}
+  button.star{background:none;border:0;cursor:pointer;color:var(--ink-3);font-size:15px;padding:0 2px}
+  button.star.on{color:var(--gold)}
+  .suspicious{color:var(--bad); font-size:11px; margin-left:6px}
+  .empty{padding:40px 20px; color:var(--ink-3); text-align:center}
+  .hint{padding:0 20px 14px; color:var(--ink-3); font-size:12px; max-width:80ch}
+
+  dialog{
+    border:1px solid var(--line); border-radius:6px; background:var(--panel);
+    color:var(--ink); padding:0; min-width:300px; font:inherit;
+  }
+  dialog::backdrop{background:rgba(0,0,0,.55)}
+  dialog h3{margin:0; padding:14px 18px; border-bottom:1px solid var(--line); font-size:14px}
+  dialog .fields{padding:16px 18px; display:grid; gap:12px}
+  dialog label{display:grid; gap:5px; font-size:12px; color:var(--ink-2)}
+  dialog input{
+    background:var(--panel-2); color:var(--ink); border:1px solid var(--line);
+    border-radius:4px; padding:7px 9px; font:inherit; font-size:14px;
+  }
+  dialog input:focus-visible{outline:2px solid var(--gold); outline-offset:1px}
+  dialog menu{
+    margin:0; padding:12px 18px; border-top:1px solid var(--line);
+    display:flex; gap:8px; justify-content:flex-end;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>FrameTax</h1>
+  <span class="stat">sweep <b id="s-age">–</b></span>
+  <span class="stat"><b id="s-markets">–</b> markets</span>
+  <span class="stat"><b id="s-orders">–</b> orders tracked</span>
+  <span class="stat"><b id="s-alerts">–</b> alerts</span>
+  <span class="stat"><b id="s-whispers">–</b> whispers logged</span>
+  <span class="stat" id="stale"></span>
+</header>
+
+<nav>
+  <button data-tab="ops" aria-selected="true">Opportunities</button>
+  <button data-tab="alerts" aria-selected="false">Live alerts</button>
+  <button data-tab="log" aria-selected="false">Whisper log</button>
+  <button data-tab="trades" aria-selected="false">Trades &amp; P&amp;L</button>
+</nav>
+
+<section id="tab-ops">
+  <div class="bar">
+    <select id="kind">
+      <option value="">both strategies</option>
+      <option value="spread">spread only</option>
+      <option value="set">set arbitrage only</option>
+    </select>
+    <input type="search" id="filter" placeholder="filter by name…">
+    <label class="chk"><input type="checkbox" id="watched-only"> watchlist only</label>
+    <label class="field"><span>Rank by</span>
+      <select id="sort">
+        <option value="score">platinum / 48h</option>
+        <option value="return">return on capital</option>
+      </select>
+    </label>
+    <label class="field"><span>Max capital</span>
+      <input type="number" id="capital" min="0" step="10" placeholder="any">
+      <span class="unit">p per trade</span>
+    </label>
+    <button class="act" id="refresh">refresh</button>
+  </div>
+  <p class="hint">
+    Prices come from the last full sweep unless marked <span class="live">live</span>, which means
+    the feed refreshed them within the last 15 minutes. Treat the rest as a hypothesis and confirm in game.
+    A <span class="ghost">ghost</span> tag means that ask has been cheapest for several sweeps without selling.
+    Copying a whisper logs it, which is what builds the reply-rate column.
+  </p>
+  <div class="wrap"><table id="ops"><thead><tr>
+    <th></th><th>Item</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">Margin</th>
+    <th class="r">Vol 48h</th><th class="r">Book</th><th class="r">Score</th><th class="r">Ret</th>
+    <th>Counterparty</th><th>Whisper</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section id="tab-alerts" hidden>
+  <p class="hint">Fired by the live watcher against /v2/orders/recent. Newest first.</p>
+  <div class="wrap"><table id="alerts"><thead><tr>
+    <th>When</th><th>Kind</th><th>Item</th><th class="r">Price</th><th class="r">Vs</th>
+    <th class="r">Profit</th><th class="r">Vol</th><th>Player</th><th>Whisper</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section id="tab-log" hidden>
+  <p class="hint">
+    Every whisper you send. Recording whether someone replied is the one signal no
+    public tool has — after a few dozen trades it outperforms every freshness heuristic.
+  </p>
+  <div class="wrap"><table id="log"><thead><tr>
+    <th>Sent</th><th>Item</th><th>Player</th><th class="r">Plat</th><th>Outcome</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<dialog id="modal">
+  <form method="dialog" id="modal-form">
+    <h3 id="modal-title"></h3>
+    <div class="fields" id="modal-fields"></div>
+    <menu>
+      <button class="act" value="cancel" type="submit" formnovalidate>Cancel</button>
+      <button class="act" value="ok" type="submit" id="modal-ok">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<section id="tab-trades" hidden>
+  <div class="bar" id="pnl-bar"></div>
+  <p class="hint">
+    Every threshold in the ranking policy is a guess until these rows exist.
+    The calibration table below compares what the tool predicted against what you
+    actually realised — a ratio under 1 means it is optimistic and the filters need tightening.
+  </p>
+  <div class="wrap"><table id="calib"><thead><tr>
+    <th>Strategy</th><th class="r">Closed</th><th class="r">Predicted</th>
+    <th class="r">Realised</th><th class="r">Ratio</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div class="wrap"><table id="trades"><thead><tr>
+    <th>Item</th><th class="r">Qty</th><th class="r">Bought</th><th class="r">Sold</th>
+    <th class="r">Market</th><th class="r">P&amp;L</th><th class="r">Held</th>
+    <th>Source</th><th>Action</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const api = async (path, opts) => {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+  return res.json();
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let rows = [];
+
+/**
+ * A small native-dialog form, used instead of prompt().
+ *
+ * prompt() blocks the page, cannot be styled or labelled, and browsers are
+ * steadily restricting it. Resolves to an object of values, or null on cancel.
+ */
+function askForm(title, fields) {
+  const modal = $("#modal");
+  $("#modal-title").textContent = title;
+  $("#modal-fields").innerHTML = fields.map((f) => `
+    <label>${esc(f.label)}
+      <input name="${esc(f.name)}" type="${f.type || "text"}"
+             value="${esc(f.value ?? "")}" ${f.type === "number" ? 'step="1" min="0"' : ""}>
+    </label>`).join("");
+
+  return new Promise((resolve) => {
+    const onClose = () => {
+      modal.removeEventListener("close", onClose);
+      if (modal.returnValue !== "ok") return resolve(null);
+      const data = new FormData($("#modal-form"));
+      resolve(Object.fromEntries([...data.entries()]));
+    };
+    modal.addEventListener("close", onClose);
+    modal.showModal();
+    $("#modal-fields input")?.focus();
+  });
+}
+
+function rateCell(c) {
+  if (!c) return '<span class="rate none">–</span>';
+  if (c.sent === 0) return `<span class="who">${esc(c.ingameName)}</span> <span class="rate none">no history</span>`;
+  const pct = Math.round((c.replied / c.sent) * 100);
+  const cls = pct >= 50 ? "good" : "bad";
+  return `<span class="who">${esc(c.ingameName)}</span> <span class="rate ${cls}">${pct}% of ${c.sent}</span>`;
+}
+
+function renderOps() {
+  const q = $("#filter").value.trim().toLowerCase();
+  const shown = q ? rows.filter((r) => r.name.toLowerCase().includes(q)) : rows;
+  const body = $("#ops tbody");
+
+  if (!shown.length) {
+    body.innerHTML = `<tr><td colspan="11" class="empty">Nothing matches. Run a sweep, or widen the filter.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = shown.map((r, i) => {
+    const ageCls = (r.bookAgeH ?? 0) > 24 ? "age-old" : "age-fresh";
+    // Both strategies start by buying, so the whisper always targets the
+    // cheapest live ask.
+    const target = r.seller;
+    return `<tr data-i="${i}">
+      <td><button class="star ${r.watched ? "on" : ""}" data-act="watch">${r.watched ? "★" : "☆"}</button></td>
+      <td><span class="name">${esc(r.name)}</span>${r.variant ? `<span class="variant">${esc(r.variant)}</span>` : ""}
+          <div class="kind">${r.kind}${r.detail ? " · " + esc(r.detail) : ""}</div></td>
+      <td class="r num">${r.buyAt}</td>
+      <td class="r num">${r.sellAt}</td>
+      <td class="r num margin">+${r.margin}</td>
+      <td class="r num">${r.volume48h}</td>
+      <td class="r num ${ageCls}">${r.liveAt ? '<span class="live">live</span>' : (r.bookAgeH === null ? "–" : r.bookAgeH.toFixed(0) + "h")}</td>
+      <td class="r num">${r.score}</td>
+      <td class="r num">${Math.round(r.marginPct * 100)}%</td>
+      <td>${rateCell(target)}${r.ghostSweeps > 1 ? `<span class="ghost" title="cheapest ask, unsold across ${r.ghostSweeps} sweeps">ghost ×${r.ghostSweeps}</span>` : ""}</td>
+      <td>${r.buyWhisper ? `<button class="act" data-act="whisper">copy</button>` : "–"}
+          <button class="act" data-act="bought" title="record that you bought this">bought</button></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadOps() {
+  const params = new URLSearchParams();
+  if ($("#kind").value) params.set("kind", $("#kind").value);
+  if ($("#watched-only").checked) params.set("watched", "1");
+  if ($("#sort").value === "return") params.set("sort", "return");
+  if ($("#capital").value) params.set("maxBuyAt", $("#capital").value);
+  rows = await api("/api/opportunities?" + params);
+  renderOps();
+}
+
+async function copyWhisper(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+}
+
+$("#ops").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const row = rows[Number(btn.closest("tr").dataset.i)];
+
+  if (btn.dataset.act === "watch") {
+    row.watched = !row.watched;
+    await api("/api/watch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ itemId: row.itemId, variant: row.variant, on: row.watched }),
+    });
+    renderOps();
+    loadStatus();
+    return;
+  }
+
+  if (btn.dataset.act === "bought") {
+    const form = await askForm(`Bought ${row.name}`, [
+      { name: "paid", label: "Paid per unit (platinum)", type: "number", value: row.buyAt },
+      { name: "qty", label: "Quantity", type: "number", value: 1 },
+    ]);
+    if (!form) return;
+    const paid = form.paid;
+    const qty = form.qty;
+    await api("/api/trades", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        itemId: row.itemId,
+        variant: row.variant,
+        quantity: Number(qty),
+        buyPrice: Number(paid),
+        boughtFrom: row.seller ? row.seller.ingameName : null,
+        expectedSell: row.sellAt,
+        expectedMargin: row.margin,
+        source: row.kind,
+      }),
+    });
+    btn.textContent = "logged";
+    btn.classList.add("done");
+    return;
+  }
+
+  if (btn.dataset.act === "whisper" && row.seller) {
+    await copyWhisper(row.buyWhisper);
+    btn.textContent = "copied";
+    btn.classList.add("done");
+    // Logging on copy is what makes the reply-rate column possible.
+    await api("/api/whispers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        itemId: row.itemId,
+        userId: row.seller.userId,
+        ingameName: row.seller.ingameName,
+        platinum: row.seller.platinum,
+        note: row.kind,
+      }),
+    });
+    loadStatus();
+  }
+});
+
+async function loadAlerts() {
+  const list = await api("/api/alerts");
+  const body = $("#alerts tbody");
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="9" class="empty">No alerts yet. Run: npx tsx scripts/watch.ts</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map((a) => {
+    const side = a.kind === "underpriced_sell" ? "buy" : "sell";
+    const whisper = `/w ${a.ingame_name} Hi! I want to ${side}: "${a.item_name}" for ${a.platinum} platinum. (warframe.market)`;
+    return `<tr>
+      <td class="num">${new Date(a.fired_at).toLocaleTimeString()}</td>
+      <td class="kind">${a.kind === "underpriced_sell" ? "buy it" : "sell to them"}</td>
+      <td><span class="name">${esc(a.item_name)}</span></td>
+      <td class="r num">${a.platinum}</td>
+      <td class="r num">${a.reference}</td>
+      <td class="r num margin">+${a.profit}</td>
+      <td class="r num">${a.volume_48h ?? "–"}</td>
+      <td class="who">${esc(a.ingame_name)} <span class="rate none">${esc(a.user_status)}</span></td>
+      <td><button class="act" data-w="${esc(whisper)}">copy</button></td>
+    </tr>`;
+  }).join("");
+}
+
+$("#alerts").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-w]");
+  if (!btn) return;
+  await copyWhisper(btn.dataset.w);
+  btn.textContent = "copied";
+  btn.classList.add("done");
+});
+
+async function loadLog() {
+  const list = await api("/api/whispers");
+  const body = $("#log tbody");
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">Nothing logged yet. Copying a whisper records it here.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map((w) => `<tr data-id="${w.id}">
+    <td class="num">${new Date(w.sent_at).toLocaleString()}</td>
+    <td>${esc(w.item_name)}</td>
+    <td class="who">${esc(w.ingame_name)}</td>
+    <td class="r num">${w.platinum}</td>
+    <td>
+      ${w.replied === null || w.replied === undefined
+        ? `<button class="act" data-r="1">replied</button> <button class="act" data-r="0">no reply</button>`
+        : w.replied
+          ? `<span class="rate good">replied</span> ${w.traded ? '<span class="rate good">· traded</span>' : '<button class="act" data-t="1">mark traded</button>'}`
+          : `<span class="rate bad">no reply</span>`}
+    </td>
+  </tr>`).join("");
+}
+
+$("#log").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const id = btn.closest("tr").dataset.id;
+  const patch = btn.dataset.r !== undefined
+    ? { replied: btn.dataset.r === "1" }
+    : { traded: true };
+  await api("/api/whispers/" + id, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  loadLog();
+});
+
+let trades = [];
+
+async function loadTrades() {
+  const [list, p] = await Promise.all([api("/api/trades"), api("/api/pnl")]);
+  trades = list;
+
+  const sign = (n) => (n > 0 ? `+${n}` : String(n));
+  const cls = (n) => (n > 0 ? "margin" : n < 0 ? "rate bad" : "");
+  $("#pnl-bar").innerHTML = `
+    <span class="stat">realised <b class="${cls(p.realised)}">${sign(p.realised)}p</b></span>
+    <span class="stat"><b>${p.closedCount}</b> closed · <b>${p.wins}</b>W/<b>${p.losses}</b>L
+      ${p.winRate === null ? "" : `(${Math.round(p.winRate * 100)}%)`}</span>
+    <span class="stat"><b>${p.openCount}</b> open, <b>${p.openCost}p</b> tied up</span>
+    ${p.openMarkToMarket === null ? "" :
+      `<span class="stat">unrealised <b class="${cls(p.openMarkToMarket)}">${sign(p.openMarkToMarket)}p</b></span>`}
+    ${p.medianHoldH === null ? "" : `<span class="stat">median hold <b>${p.medianHoldH}h</b></span>`}`;
+
+  $("#calib tbody").innerHTML = p.bySource.length
+    ? p.bySource.map((c) => `<tr>
+        <td class="kind">${esc(c.source)}</td>
+        <td class="r num">${c.closed}</td>
+        <td class="r num">${c.expected === null ? "–" : c.expected.toFixed(1) + "p"}</td>
+        <td class="r num">${c.actual === null ? "–" : c.actual.toFixed(1) + "p"}</td>
+        <td class="r num ${c.ratio === null ? "" : c.ratio < 0.8 ? "rate bad" : "margin"}">${
+          c.ratio === null ? "–" : c.ratio.toFixed(2)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="5" class="empty">No closed trades yet — calibration needs a few dozen.</td></tr>`;
+
+  $("#trades tbody").innerHTML = list.length
+    ? list.map((t, i) => {
+        const open = t.profit === null;
+        const unreal = open && t.marketNow !== null ? (t.marketNow - t.buyPrice) * t.quantity : null;
+        return `<tr data-i="${i}">
+          <td><span class="name">${esc(t.name)}</span>${t.variant ? `<span class="variant">${esc(t.variant)}</span>` : ""}</td>
+          <td class="r num">${t.quantity}</td>
+          <td class="r num">${t.buyPrice}</td>
+          <td class="r num">${t.sellPrice === null ? "–" : t.sellPrice}</td>
+          <td class="r num">${t.marketNow === null ? "–" : t.marketNow}</td>
+          <td class="r num ${open ? "" : cls(t.profit)}">${
+            open ? (unreal === null ? "–" : `<span class="rate none">${sign(unreal)}p unreal.</span>`) : sign(t.profit) + "p"}</td>
+          <td class="r num">${t.heldH}h</td>
+          <td class="kind">${esc(t.source)}</td>
+          <td>${open ? `<button class="act" data-act="sold">sold</button> ` : ""}
+              <button class="act" data-act="drop" title="delete this record">✕</button></td>
+        </tr>`;
+      }).join("")
+    : `<tr><td colspan="9" class="empty">Nothing yet. Use "bought" on an opportunity to open a position.</td></tr>`;
+}
+
+$("#trades").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const t = trades[Number(btn.closest("tr").dataset.i)];
+
+  if (btn.dataset.act === "drop") {
+    const ok = await askForm(`Delete the ${t.name} position?`, [
+      { name: "confirm", label: 'Type "delete" to remove this record permanently' },
+    ]);
+    if (!ok || ok.confirm.trim().toLowerCase() !== "delete") return;
+    await api("/api/trades/" + t.id, { method: "DELETE" });
+    loadTrades();
+    return;
+  }
+
+  const form = await askForm(`Sold ${t.name}`, [
+    { name: "got", label: "Sold for per unit (platinum)", type: "number",
+      value: t.expectedSell ?? t.marketNow ?? "" },
+    { name: "to", label: "Sold to (optional)" },
+  ]);
+  if (!form) return;
+  await api("/api/trades/" + t.id, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sellPrice: Number(form.got), soldTo: form.to || null }),
+  });
+  loadTrades();
+});
+
+async function loadStatus() {
+  const s = await api("/api/status");
+  $("#s-age").textContent = s.sweepAgeH === null ? "none" : s.sweepAgeH + "h ago";
+  $("#s-markets").textContent = s.markets.toLocaleString();
+  $("#s-orders").textContent = s.ordersTracked.toLocaleString();
+  $("#s-alerts").textContent = s.alerts;
+  $("#s-whispers").textContent = s.whispers;
+  $("#stale").textContent = s.sweepAgeH > 24 ? "⚠ baseline over a day old — re-run the sweep" : "";
+}
+
+document.querySelector("nav").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  for (const b of document.querySelectorAll("nav button")) {
+    b.setAttribute("aria-selected", String(b === btn));
+  }
+  for (const id of ["ops", "alerts", "log", "trades"]) {
+    document.getElementById("tab-" + id).hidden = id !== btn.dataset.tab;
+  }
+  if (btn.dataset.tab === "alerts") loadAlerts();
+  if (btn.dataset.tab === "log") loadLog();
+  if (btn.dataset.tab === "trades") loadTrades();
+});
+
+$("#kind").addEventListener("change", loadOps);
+$("#sort").addEventListener("change", loadOps);
+$("#capital").addEventListener("change", loadOps);
+$("#watched-only").addEventListener("change", loadOps);
+$("#filter").addEventListener("input", renderOps);
+$("#refresh").addEventListener("click", loadOps);
+
+loadStatus();
+loadOps();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>
