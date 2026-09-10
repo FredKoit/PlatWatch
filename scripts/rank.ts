@@ -46,15 +46,19 @@ const all: Array<Opportunity | null> = [];
 if (kind !== "set") all.push(...spreadRows(db, sweepId).map((r) => scoreSpread(r, policy)));
 if (kind !== "spread") all.push(...setRows(db, sweepId).map((s) => scoreSet(s, policy)));
 
-const ranked = rank(all, flag("sort") === "return" ? "return" : "score");
+const sortBy = flag("sort") === "return" ? "return" : "score";
+const ranked = rank(all, sortBy);
 
 const pad = (s: string | number, n: number) => String(s).padStart(n);
 const cell = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s.padEnd(n));
 
 console.log(
-  `\nsweep #${sweepId} · policy: volume≥${DEFAULT_POLICY.minVolume48h}/48h, ` +
-    `≥${DEFAULT_POLICY.minSellOrders} asks, book<${DEFAULT_POLICY.maxBookAgeHours}h, ` +
-    `margin≥${DEFAULT_POLICY.minMarginPlat}p & ${DEFAULT_POLICY.minMarginPct * 100}%\n`,
+  `\nsweep #${sweepId} · policy: volume≥${policy.minVolume48h}/48h, ` +
+    `≥${policy.minSellOrders} asks / ${policy.minBuyOrders} bids, ` +
+    `book<${policy.maxBookAgeHours}h, ` +
+    `margin≥${policy.minMarginPlat}p & ${policy.minMarginPct * 100}%` +
+    (policy.maxBuyAt ? `, capital≤${policy.maxBuyAt}p` : "") +
+    ` · ranked by ${sortBy === "return" ? "return on capital" : "platinum/48h"}\n`,
 );
 console.log(
   cell("item", 32),

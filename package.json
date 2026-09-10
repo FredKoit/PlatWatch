@@ -5,6 +5,7 @@
   "type": "module",
   "description": "PlatWatch — Warframe platinum trading scanner (PC)",
   "scripts": {
+    "start": "tsx scripts/daemon.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
     "verify:phase1": "tsx scripts/verify-phase1.ts",
@@ -16,7 +17,8 @@
     "verify:phase3": "tsx scripts/verify-phase3.ts",
     "verify:phase5": "tsx scripts/verify-phase5.ts",
     "daemon": "tsx scripts/daemon.ts",
-    "start": "tsx scripts/daemon.ts"
+    "ducats": "tsx scripts/ducats.ts",
+    "sell": "tsx scripts/sell.ts"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
