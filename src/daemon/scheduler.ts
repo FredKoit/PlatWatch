@@ -22,7 +22,12 @@ export interface Job {
    * them serialises the bulk work while leaving short, high-priority jobs free.
    */
   group?: string;
-  run(signal: AbortSignal): Promise<void>;
+  /**
+   * Resolve "idle" when there was nothing to do. The watchlist runs every five
+   * minutes and the part-list check hourly, and both usually have nothing to
+   * do; logging "started / done in 0.0s" for each was most of the log.
+   */
+  run(signal: AbortSignal): Promise<void | "idle">;
 }
 
 const key = (name: string) => `job:${name}:lastRun`;
@@ -63,7 +68,7 @@ export interface SchedulerOptions {
   /** How often to re-check what is due. */
   tickMs?: number;
   onStart?: (job: string) => void;
-  onFinish?: (job: string, ms: number) => void;
+  onFinish?: (job: string, ms: number, idle: boolean) => void;
   onError?: (job: string, err: unknown) => void;
 }
 
@@ -87,11 +92,11 @@ export async function runScheduler(db: Db, jobs: Job[], opts: SchedulerOptions):
     opts.onStart?.(job.name);
     void job
       .run(opts.signal)
-      .then(() => {
+      .then((result) => {
         // Stamped on completion, so a job that takes longer than its interval
         // does not immediately become due again.
         markRun(db, job.name);
-        opts.onFinish?.(job.name, Date.now() - started);
+        opts.onFinish?.(job.name, Date.now() - started, result === "idle");
       })
       .catch((err: unknown) => {
         // Still stamped: a failing job must back off to its interval rather

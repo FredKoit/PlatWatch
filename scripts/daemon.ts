@@ -4,6 +4,7 @@
  *   tsx scripts/daemon.ts
  *   tsx scripts/daemon.ts --port 8080 --poll 90
  *   tsx scripts/daemon.ts --no-watch      — scheduler + UI, no live sniper
+ *   tsx scripts/daemon.ts --no-toast      — no Windows notifications
  *   tsx scripts/daemon.ts --log .cache/platwatch.log   — for running unattended
  *
  * Only one runs at a time. The UI port is the lock: binding it is atomic and
@@ -16,9 +17,9 @@
  *
  * Set DISCORD_WEBHOOK_URL to push alerts to a phone.
  */
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { dirname } from "node:path";
 import { openDb, startSweep } from "../src/db/index";
+import { rotatingWriter } from "../src/daemon/logfile";
+import { applyRetention, RETENTION_DAYS } from "../src/db/retention";
 import { PRIORITY } from "../src/wfm/limiter";
 import { limiter } from "../src/wfm/http";
 import { itemsToSweep, sweepTopOrders } from "../src/ingest/sweep";
@@ -33,7 +34,7 @@ import { watchedItems } from "../src/web/api";
 import { latestSweepId } from "../src/rank/query";
 import { watch } from "../src/live/watcher";
 import { DEFAULT_ALERT_POLICY } from "../src/live/detect";
-import { consoleSink, discordSink, fanOut, type Sink } from "../src/live/notify";
+import { consoleSink, discordSink, fanOut, toastSink, type Sink } from "../src/live/notify";
 
 const args = process.argv.slice(2);
 const flag = (n: string): string | null => {
@@ -47,18 +48,10 @@ const has = (n: string) => args.includes(`--${n}`);
 // uncaught errors — has to reach a file or it is simply lost.
 const logFile = flag("log");
 if (logFile) {
-  mkdirSync(dirname(logFile), { recursive: true });
-  try {
-    if (statSync(logFile).size > 5 * 1024 * 1024) renameSync(logFile, `${logFile}.1`);
-  } catch {
-    // no log yet
-  }
-  // Synchronous on purpose. A buffered stream lost every line written just
-  // before process.exit — so the "port in use, not starting" message never
-  // reached the log, which is precisely when you would go looking for it. A
-  // daemon writing a few lines a minute can afford a synchronous append.
+  // Rotates while running, not only at startup — see src/daemon/logfile.ts.
+  const write = rotatingWriter(logFile);
   const toFile = (chunk: string | Uint8Array, encoding?: unknown, cb?: unknown): boolean => {
-    appendFileSync(logFile, chunk);
+    write(chunk);
     const done = typeof encoding === "function" ? encoding : cb;
     if (typeof done === "function") (done as () => void)();
     return true;
@@ -68,10 +61,10 @@ if (logFile) {
   // A crash must leave its reason behind; exiting non-zero lets Task
   // Scheduler's restart-on-failure bring it back.
   process.on("uncaughtException", (err) => {
-    appendFileSync(logFile, `${new Date().toISOString()} FATAL ${err.stack ?? err}\n`);
+    write(`${new Date().toISOString()} FATAL ${err.stack ?? err}\n`);
     process.exit(1);
   });
-  appendFileSync(logFile, `\n──── ${new Date().toISOString()} PlatWatch starting (pid ${process.pid}) ────\n`);
+  write(`\n──── ${new Date().toISOString()} PlatWatch starting (pid ${process.pid}) ────\n`);
 }
 
 const MINUTE = 60_000;
@@ -107,7 +100,7 @@ const jobs: Job[] = [
     everyMs: 1 * HOUR,
     async run(signal) {
       const missing = setRootsMissingParts(db);
-      if (missing.length === 0) return;
+      if (missing.length === 0) return "idle";
       log("details", `${missing.length} set(s) missing their part list: ${missing.map((m) => m.slug).join(", ")}`);
       const result = await ingestSetDetails(db, undefined, signal, { onlyMissing: true });
       log(
@@ -123,6 +116,7 @@ const jobs: Job[] = [
     everyMs: 6 * HOUR,
     async run(signal) {
       const items = itemsToSweep(db);
+      log("sweep", `sweeping ${items.length} items (~22 min)`);
       // Resume a sweep the last run left unfinished rather than discarding
       // twenty minutes of work. sweepTopOrders skips items already recorded
       // under that id, so this costs only what is still missing.
@@ -160,8 +154,26 @@ const jobs: Job[] = [
         log("stats", "skipped — no completed sweep yet");
         return;
       }
-      const result = await ingestStats(db, statsCandidates(db, sweepId), { signal });
+      const candidates = statsCandidates(db, sweepId);
+      log("stats", `fetching price history for ${candidates.length} items (~20 min)`);
+      const result = await ingestStats(db, candidates, { signal });
       log("stats", `${result.ok} fetched, ${result.skipped} fresh, ${result.failed} failed`);
+    },
+  },
+  {
+    // Without this the database grew ~40 MB a day forever. See
+    // src/db/retention.ts for exactly what is removed and what never is.
+    name: "retention",
+    group: "bulk",
+    everyMs: 24 * HOUR,
+    async run() {
+      const r = applyRetention(db);
+      if (r.orders === 0 && r.snapshots === 0) return "idle";
+      log(
+        "retention",
+        `removed ${r.orders} orders that left the book over ${RETENTION_DAYS} days ago, ` +
+          `${r.snapshots} old snapshot rows`,
+      );
     },
   },
   {
@@ -170,7 +182,7 @@ const jobs: Job[] = [
     runOnFirstStart: false,
     async run(signal) {
       const items = watchedItems(db);
-      if (items.length === 0) return;
+      if (items.length === 0) return "idle";
       // Deliberately NOT a sweep — see src/ingest/watchlist.ts. It used to be
       // one, and it replaced the whole market with the handful of starred items.
       const result = await refreshWatched(db, items, { signal });
@@ -183,6 +195,11 @@ const jobs: Job[] = [
 
 async function runWatcher(): Promise<void> {
   const sinks: Sink[] = [consoleSink];
+  // Toasts are the channel that works unattended. Run from Task Scheduler the
+  // console is a log file, so without this every alert went unseen.
+  if (process.platform === "win32" && !has("no-toast")) {
+    sinks.push(toastSink({ url: `http://127.0.0.1:${port}` }));
+  }
   const webhook = process.env["DISCORD_WEBHOOK_URL"];
   if (webhook) sinks.push(discordSink(webhook));
 
@@ -248,13 +265,19 @@ server.listen(port, "127.0.0.1", () => {
 
   scheduler = runScheduler(db, jobs, {
     signal: controller.signal,
-    onStart: (job) => log("job", `${job} started`),
-    onFinish: (job, ms) => log("job", `${job} done in ${(ms / 1000).toFixed(1)}s`),
+    // No generic "started" line: jobs that do real work say so themselves, and
+    // the ones that usually do nothing were most of the log.
+    onFinish: (job, ms, idle) => {
+      if (!idle) log("job", `${job} done in ${(ms / 1000).toFixed(1)}s`);
+    },
     onError: (job, err) => log("job", `${job} FAILED: ${err instanceof Error ? err.message : err}`),
   });
   watcher = has("no-watch") ? Promise.resolve() : runWatcher();
 
-  log("daemon", `started · sweep 6h · stats daily · details hourly · watchlist 5m`);
+  log(
+    "daemon",
+    `started · sweep 6h · stats daily · retention daily · details hourly · watchlist 5m`,
+  );
   log("daemon", `one rate limiter at 3 req/s shared by every job`);
 });
 

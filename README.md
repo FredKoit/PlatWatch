@@ -20,7 +20,22 @@ the catalogue, sweeps every item's order book (~22 min), then pulls price
 history (~20 min). The live sniper waits for that sweep to finish and then
 starts on its own.
 
-Set `DISCORD_WEBHOOK_URL` to push alerts to a phone.
+## Alerts
+
+On Windows, alerts arrive as **toast notifications** — the one channel that
+works with nobody at a terminal. A burst becomes a single toast, led by the best
+genuine find, and clicking it opens the UI to copy the whisper. Turn them off
+with `--no-toast`.
+
+For a phone, set `DISCORD_WEBHOOK_URL`. When PlatWatch runs from Task Scheduler
+this has to be a **user** environment variable — a scheduled task never sees
+variables set only in a shell:
+
+```powershell
+[Environment]::SetEnvironmentVariable('DISCORD_WEBHOOK_URL', '<your webhook>', 'User')
+```
+
+Then restart the daemon so it picks the variable up.
 
 ## Running it unattended
 
@@ -33,7 +48,8 @@ Start-ScheduledTask -TaskName PlatWatch      # start now, without logging out
 ```
 
 It runs as you, only while you are logged on — no administrator rights, no
-stored password. Output goes to `.cache\platwatch.log`, rotated at 5 MB.
+stored password. Output goes to `.cache\platwatch.log`, which rotates to
+`platwatch.log.1` whenever it passes 5 MB — while running, not just at start.
 
 | Script | What it does |
 |---|---|
@@ -45,11 +61,12 @@ stops the PowerShell launcher but can leave its node child running; the script
 targets whatever holds the port. A hard stop is safe: SQLite is in WAL mode and
 an interrupted sweep resumes on the next start.
 
-**Only one daemon runs at a time.** The UI port is the lock, so a second
-`npm start` exits immediately rather than running a second rate limiter
-alongside the first. The standalone `npm run ingest` and `npm run watch` do not
-take that lock — don't run them while the daemon is up, or they will double the
-load on warframe.market.
+**Only one process talks to warframe.market at a time.** The UI port is the
+lock. A second `npm start`, and `npm run ingest` / `npm run watch` /
+`npm run verify:phase1` while the daemon is up, all refuse and say why — each
+would otherwise run its own rate limiter and double the load. To run one of
+those by hand, stop the daemon first. Anything that only reads the database
+(`rank`, `ducats`, `sell`, the other gates) runs freely alongside it.
 
 ## Commands
 
@@ -61,22 +78,22 @@ load on warframe.market.
 | `npm run sell -- rhino_prime_set` | What to list something at, and how long it will take |
 | `npm run watch` | Live sniper alone |
 | `npm run ingest -- sweep` | A crawl by hand: `catalog`, `details`, `sweep`, `stats` |
-| `npm test` | 153 tests |
+| `npm test` | 174 tests |
 
 Sweeps are resumable. Interrupt one and `npm run ingest -- sweep --resume`
 continues it rather than starting over.
 
 ## Why one process
 
-The rate limiter is per-process. Running `serve`, `watch` and `ingest`
-separately gives each its own 3 req/s budget and puts 9 req/s at a small
-volunteer-run service. The daemon shares one limiter across every job, and
-priority keeps the live poll ahead of a 22-minute crawl.
+The rate limiter is per-process. Separate processes each get their own 3 req/s
+budget, and a small volunteer-run service sees the sum. The daemon shares one
+limiter across every job, and priority keeps the live poll ahead of a
+22-minute crawl.
 
 Jobs: catalogue daily, part lists for new sets hourly (no requests unless a new
-Prime Access landed), full sweep every 6h, price history daily, watchlist every
-5 min. Last-run times persist, so restarting does not re-trigger a long
-crawl.
+Prime Access landed), full sweep every 6h, price history daily, retention daily,
+watchlist every 5 min. Jobs with nothing to do log nothing. Last-run times
+persist, so restarting does not re-trigger a long crawl.
 
 ## How it decides
 
@@ -150,6 +167,15 @@ not *bad* ones: the lowest ask is frequently held by someone offline.
 
 SQLite at `.cache/platwatch.db`. Schema in `src/db/schema.sql`, changes in
 `src/db/migrate.ts`.
+
+**Retention: 30 days.** A daily job removes orders that left the book more than
+30 days ago, and snapshots from sweeps older than that. It never removes an
+order still on the book, an order your whisper log refers to, or the latest
+full sweep. Without it the database grew about 40 MB a day indefinitely; with
+it, it levels off around 1 GB. Deleted space is reused rather than returned, so
+the file stops growing instead of shrinking. The window is `RETENTION_DAYS` in
+`src/db/retention.ts`. Price history (`stat_daily`) is left alone: it is small,
+and anything older than 90 days cannot be fetched again.
 
 One rule governs migrations: **`order_seen.first_seen` records when *you* first
 saw an order and cannot be refetched at any price.** Derived caches like
