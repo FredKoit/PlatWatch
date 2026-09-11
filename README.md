@@ -17,10 +17,39 @@ Then open <http://127.0.0.1:5173>.
 
 The first run needs a baseline before anything is rankable — the daemon fetches
 the catalogue, sweeps every item's order book (~22 min), then pulls price
-history (~11 min). The live sniper waits for that sweep to finish and then
+history (~20 min). The live sniper waits for that sweep to finish and then
 starts on its own.
 
 Set `DISCORD_WEBHOOK_URL` to push alerts to a phone.
+
+## Running it unattended
+
+`npm start` stops when its terminal closes. To keep PlatWatch running and have
+it start at login, register it with Task Scheduler:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task.ps1
+Start-ScheduledTask -TaskName PlatWatch      # start now, without logging out
+```
+
+It runs as you, only while you are logged on — no administrator rights, no
+stored password. Output goes to `.cache\platwatch.log`, rotated at 5 MB.
+
+| Script | What it does |
+|---|---|
+| `scripts\platwatch-stop.ps1` | Stop the running daemon |
+| `scripts\uninstall-task.ps1` | Remove the task and stop the daemon |
+
+Stop it with the script rather than "End" in Task Scheduler. Ending the task
+stops the PowerShell launcher but can leave its node child running; the script
+targets whatever holds the port. A hard stop is safe: SQLite is in WAL mode and
+an interrupted sweep resumes on the next start.
+
+**Only one daemon runs at a time.** The UI port is the lock, so a second
+`npm start` exits immediately rather than running a second rate limiter
+alongside the first. The standalone `npm run ingest` and `npm run watch` do not
+take that lock — don't run them while the daemon is up, or they will double the
+load on warframe.market.
 
 ## Commands
 
@@ -32,7 +61,7 @@ Set `DISCORD_WEBHOOK_URL` to push alerts to a phone.
 | `npm run sell -- rhino_prime_set` | What to list something at, and how long it will take |
 | `npm run watch` | Live sniper alone |
 | `npm run ingest -- sweep` | A crawl by hand: `catalog`, `details`, `sweep`, `stats` |
-| `npm test` | 124 tests |
+| `npm test` | 153 tests |
 
 Sweeps are resumable. Interrupt one and `npm run ingest -- sweep --resume`
 continues it rather than starting over.
@@ -44,8 +73,9 @@ separately gives each its own 3 req/s budget and puts 9 req/s at a small
 volunteer-run service. The daemon shares one limiter across every job, and
 priority keeps the live poll ahead of a 22-minute crawl.
 
-Jobs: catalogue daily, full sweep every 6h, price history daily, watchlist
-every 5 min. Last-run times persist, so restarting does not re-trigger a long
+Jobs: catalogue daily, part lists for new sets hourly (no requests unless a new
+Prime Access landed), full sweep every 6h, price history daily, watchlist every
+5 min. Last-run times persist, so restarting does not re-trigger a long
 crawl.
 
 ## How it decides

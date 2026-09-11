@@ -4,6 +4,10 @@
  *   tsx scripts/daemon.ts
  *   tsx scripts/daemon.ts --port 8080 --poll 90
  *   tsx scripts/daemon.ts --no-watch      — scheduler + UI, no live sniper
+ *   tsx scripts/daemon.ts --log .cache/platwatch.log   — for running unattended
+ *
+ * Only one runs at a time. The UI port is the lock: binding it is atomic and
+ * the OS releases it on crash or reboot, so there is no stale lock to clear.
  *
  * Why one process: the rate limiter is per-process. Running `serve`, `watch`
  * and `ingest` separately gives each its own 3 req/s budget and puts 9 req/s at
@@ -12,6 +16,8 @@
  *
  * Set DISCORD_WEBHOOK_URL to push alerts to a phone.
  */
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { openDb, startSweep } from "../src/db/index";
 import { PRIORITY } from "../src/wfm/limiter";
 import { limiter } from "../src/wfm/http";
@@ -35,6 +41,38 @@ const flag = (n: string): string | null => {
   return i >= 0 ? (args[i + 1] ?? "") : null;
 };
 const has = (n: string) => args.includes(`--${n}`);
+
+// ── unattended logging ──────────────────────────────────────────────────────
+// Under Task Scheduler there is no console, so everything — log lines, alerts,
+// uncaught errors — has to reach a file or it is simply lost.
+const logFile = flag("log");
+if (logFile) {
+  mkdirSync(dirname(logFile), { recursive: true });
+  try {
+    if (statSync(logFile).size > 5 * 1024 * 1024) renameSync(logFile, `${logFile}.1`);
+  } catch {
+    // no log yet
+  }
+  // Synchronous on purpose. A buffered stream lost every line written just
+  // before process.exit — so the "port in use, not starting" message never
+  // reached the log, which is precisely when you would go looking for it. A
+  // daemon writing a few lines a minute can afford a synchronous append.
+  const toFile = (chunk: string | Uint8Array, encoding?: unknown, cb?: unknown): boolean => {
+    appendFileSync(logFile, chunk);
+    const done = typeof encoding === "function" ? encoding : cb;
+    if (typeof done === "function") (done as () => void)();
+    return true;
+  };
+  process.stdout.write = toFile as typeof process.stdout.write;
+  process.stderr.write = toFile as typeof process.stderr.write;
+  // A crash must leave its reason behind; exiting non-zero lets Task
+  // Scheduler's restart-on-failure bring it back.
+  process.on("uncaughtException", (err) => {
+    appendFileSync(logFile, `${new Date().toISOString()} FATAL ${err.stack ?? err}\n`);
+    process.exit(1);
+  });
+  appendFileSync(logFile, `\n──── ${new Date().toISOString()} PlatWatch starting (pid ${process.pid}) ────\n`);
+}
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -185,31 +223,40 @@ async function runWatcher(): Promise<void> {
 // ── wire up ─────────────────────────────────────────────────────────────────
 
 const server = createApp(db);
+let scheduler: Promise<void> = Promise.resolve();
+let watcher: Promise<void> = Promise.resolve();
+
 server.on("error", (err: NodeJS.ErrnoException) => {
-  // Without this an EADDRINUSE takes the whole daemon down as an unhandled
-  // 'error' event, losing the scheduler and the sniper along with the UI.
   if (err.code === "EADDRINUSE") {
-    log("ui", `port ${port} is already in use — is another PlatWatch running?`);
-    log("ui", `continuing without the web UI; use --port to pick another`);
-    return;
+    // The port is the single-instance lock. This used to carry on without the
+    // UI — which meant a second scheduler and a second sniper behind a second
+    // rate limiter, doubling the load on warframe.market. That is the exact
+    // thing this process exists to prevent, and a scheduled task starting one
+    // at login makes a second instance likely. So: do nothing, and exit clean
+    // (exit 0, so Task Scheduler does not treat it as a failure and retry).
+    log("daemon", `port ${port} is in use — PlatWatch is already running, or another app holds it`);
+    log("daemon", `not starting: a second daemon would double the load on warframe.market`);
+    db.close();
+    process.exit(0);
   }
   log("ui", `server error: ${err.message}`);
 });
+
+// Nothing talks to warframe.market until the lock is held.
 server.listen(port, "127.0.0.1", () => {
   log("ui", `http://127.0.0.1:${port} (loopback only)`);
+
+  scheduler = runScheduler(db, jobs, {
+    signal: controller.signal,
+    onStart: (job) => log("job", `${job} started`),
+    onFinish: (job, ms) => log("job", `${job} done in ${(ms / 1000).toFixed(1)}s`),
+    onError: (job, err) => log("job", `${job} FAILED: ${err instanceof Error ? err.message : err}`),
+  });
+  watcher = has("no-watch") ? Promise.resolve() : runWatcher();
+
+  log("daemon", `started · sweep 6h · stats daily · details hourly · watchlist 5m`);
+  log("daemon", `one rate limiter at 3 req/s shared by every job`);
 });
-
-const scheduler = runScheduler(db, jobs, {
-  signal: controller.signal,
-  onStart: (job) => log("job", `${job} started`),
-  onFinish: (job, ms) => log("job", `${job} done in ${(ms / 1000).toFixed(1)}s`),
-  onError: (job, err) => log("job", `${job} FAILED: ${err instanceof Error ? err.message : err}`),
-});
-
-const watcher = has("no-watch") ? Promise.resolve() : runWatcher();
-
-log("daemon", `started · sweep every 6h · stats daily · watchlist every 5m`);
-log("daemon", `one rate limiter at 3 req/s shared by every job`);
 
 process.on("SIGINT", () => {
   console.log("\nstopping…");
