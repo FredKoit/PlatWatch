@@ -17,6 +17,7 @@ import { PRIORITY } from "../src/wfm/limiter";
 import { limiter } from "../src/wfm/http";
 import { itemsToSweep, sweepTopOrders } from "../src/ingest/sweep";
 import { ingestStats, statsCandidates } from "../src/ingest/stats";
+import { refreshWatched } from "../src/ingest/watchlist";
 import { loadCatalog } from "../src/wfm/catalog";
 import { upsertCatalog } from "../src/db/repo";
 import { runScheduler, type Job } from "../src/daemon/scheduler";
@@ -69,7 +70,7 @@ const jobs: Job[] = [
       const open = db
         .prepare(
           `SELECT id FROM sweep
-            WHERE kind = 'top' AND finished_at IS NULL
+            WHERE kind = 'top' AND scope = 'full' AND finished_at IS NULL
               AND started_at > datetime('now', '-6 hours')
             ORDER BY id DESC LIMIT 1`,
         )
@@ -111,14 +112,10 @@ const jobs: Job[] = [
     async run(signal) {
       const items = watchedItems(db);
       if (items.length === 0) return;
-      const sweepId = startSweep(db, "top");
-      const result = await sweepTopOrders(db, items, {
-        sweepId,
-        signal,
-        // Outranks the nightly crawl: these are the items being traded now.
-        priority: PRIORITY.watchlist,
-      });
-      log("watchlist", `refreshed ${result.ok} item(s)`);
+      // Deliberately NOT a sweep — see src/ingest/watchlist.ts. It used to be
+      // one, and it replaced the whole market with the handful of starred items.
+      const result = await refreshWatched(db, items, { signal });
+      log("watchlist", `refreshed ${result.ok} item(s), ${result.liveUpdates} live prices`);
     },
   },
 ];

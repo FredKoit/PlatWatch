@@ -1,5 +1,6 @@
 import type { Db } from "../db/index";
 import { latestSweepId } from "./query";
+import { LIVE_OVERLAY, liveCutoff } from "../live/book";
 
 /**
  * What to list something at, once you already hold it.
@@ -89,13 +90,20 @@ export function sellAdvice(db: Db, itemId: string, variant = ""): SellAdvice {
     ? Number((days.reduce((n, d) => n + d.volume, 0) / days.length).toFixed(1))
     : 0;
 
+  // With the live overlay: a cheaper ask posted since the sweep — or seen by a
+  // watchlist refresh — is competition you have to undercut, so it must count.
+  // This read the sweep alone, so watching an item never improved its advice.
   const book = sweepId
     ? (db
         .prepare(
-          `SELECT low_sell FROM snapshot
-            WHERE item_id = ? AND variant = ? AND sweep_id = ?`,
+          `SELECT ${LIVE_OVERLAY.lowSell} AS low_sell
+             FROM snapshot s
+             LEFT JOIN live_book lb ON lb.item_id = s.item_id AND lb.variant = s.variant
+            WHERE s.item_id = @itemId AND s.variant = @variant AND s.sweep_id = @sweep`,
         )
-        .get(itemId, variant, sweepId) as { low_sell: number | null } | undefined)
+        .get({ itemId, variant, sweep: sweepId, liveCutoff: liveCutoff() }) as
+        | { low_sell: number | null }
+        | undefined)
     : undefined;
   const lowestAsk = book?.low_sell ?? null;
 

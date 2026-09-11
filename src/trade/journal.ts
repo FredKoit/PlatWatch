@@ -1,6 +1,7 @@
 import type { Db } from "../db/index";
 import { latestSweepId } from "../rank/query";
 import { sellAdvice, type SellAdvice } from "../rank/sell";
+import { LIVE_OVERLAY, liveCutoff } from "../live/book";
 
 /**
  * The trade journal.
@@ -110,15 +111,20 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
               t.sell_price AS sellPrice, t.sold_at AS soldAt, t.sold_to AS soldTo,
               t.expected_sell AS expectedSell, t.expected_margin AS expectedMargin,
               t.source, t.note,
-              s.low_sell AS marketNow
+              -- Live overlay: what a watchlist refresh or the feed saw since the
+              -- sweep. Without it, starring an open position changed nothing here.
+              ${LIVE_OVERLAY.lowSell} AS marketNow
          FROM trade t
          JOIN item i ON i.id = t.item_id
          LEFT JOIN snapshot s ON s.item_id = t.item_id AND s.variant = t.variant
                              AND s.sweep_id = @sweep
+         LEFT JOIN live_book lb ON lb.item_id = t.item_id AND lb.variant = t.variant
         ORDER BY t.sold_at IS NOT NULL, t.bought_at DESC
         LIMIT @limit`,
     )
-    .all({ sweep: sweepId, limit }) as Array<Omit<TradeRow, "profit" | "heldH" | "advice">>;
+    .all({ sweep: sweepId, limit, liveCutoff: liveCutoff() }) as Array<
+      Omit<TradeRow, "profit" | "heldH" | "advice">
+    >;
 
   const now = Date.now();
   return rows.map((r) => ({

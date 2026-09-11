@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { migrate, MIGRATIONS } from "./migrate";
-import type { Db } from "./index";
+import { openDb, type Db } from "./index";
 
 /**
  * The point of these: a schema change must never require rebuilding a database
@@ -97,5 +97,45 @@ test("a database already carrying the column is left alone", () => {
     1,
     "no duplicate column",
   );
+  db.close();
+});
+
+test("history is classified by what each sweep actually covered", () => {
+  // The real database: full sweeps at 94-100%, and an empty one from a crash.
+  const db = openDb(":memory:");
+  db.exec("PRAGMA user_version = 6"); // everything before sweep.scope
+  const items = Array.from({ length: 100 }, (_, i) => `i${i}`);
+  for (const id of items) {
+    db.prepare("INSERT INTO item (id, slug, name, tags) VALUES (?, ?, ?, '[]')").run(id, id, id);
+  }
+  const sweep = (id: number, covered: number) => {
+    db.prepare("INSERT INTO sweep (id, kind, started_at, finished_at) VALUES (?, 'top', 'x', 'x')").run(id);
+    for (const itemId of items.slice(0, covered)) {
+      db.prepare(
+        `INSERT INTO snapshot (item_id, sweep_id, variant, taken_at, sell_count, buy_count)
+         VALUES (?, ?, '', 'x', 0, 0)`,
+      ).run(itemId, id);
+    }
+  };
+  sweep(1, 100);
+  sweep(2, 94); // a full sweep: some items legitimately have no book
+  sweep(3, 0); // the empty one a crash left behind
+  sweep(4, 3); // a --limit run
+
+  // Force migration 7 to run against rows that all defaulted to 'full'.
+  db.exec("UPDATE sweep SET scope = 'full'");
+  db.exec("PRAGMA user_version = 6");
+  migrate(db);
+
+  const scopes = db.prepare("SELECT id, scope FROM sweep ORDER BY id").all() as Array<{
+    id: number;
+    scope: string;
+  }>;
+  assert.deepEqual(scopes, [
+    { id: 1, scope: "full" },
+    { id: 2, scope: "full" },
+    { id: 3, scope: "partial" },
+    { id: 4, scope: "partial" },
+  ]);
   db.close();
 });

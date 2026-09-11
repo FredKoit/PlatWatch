@@ -2,10 +2,21 @@ import type { Db } from "../db/index";
 import type { MarketRow, SetInput } from "./score";
 import { LIVE_OVERLAY, liveCutoff } from "../live/book";
 
-/** Most recent completed sweep, which every ranking is relative to. */
+/**
+ * The most recent completed FULL sweep — the baseline the ranking, the sniper
+ * and stats all read as "the market".
+ *
+ * Scope matters because every caller treats this sweep's rows as the whole
+ * catalogue. A partial sweep of a few items used to win simply by being newest,
+ * and the rest of the market vanished from all three at once.
+ */
 export function latestSweepId(db: Db): number | null {
   const row = db
-    .prepare("SELECT id FROM sweep WHERE kind='top' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+    .prepare(
+      `SELECT id FROM sweep
+        WHERE kind = 'top' AND scope = 'full' AND finished_at IS NOT NULL
+        ORDER BY id DESC LIMIT 1`,
+    )
     .get() as { id: number } | undefined;
   return row?.id ?? null;
 }

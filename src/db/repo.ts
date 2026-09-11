@@ -189,14 +189,34 @@ export function insertSnapshots(
 /**
  * Record every order observed, with its rank on the book.
  *
- * `sweeps_at_best` advances only while an order holds rank 0. That, not raw
- * age, is the ghost signal: the cheapest order on the book that nobody buys.
+ * `sweeps_at_best` is the ghost signal — the cheapest order on the book that
+ * nobody buys — and it only means anything if it counts SWEEPS, spaced hours
+ * apart. It used to advance on every read of any kind:
+ *
+ *   - the 5-minute watchlist refresh advanced it 12 times an hour, so a fresh
+ *     order became "ghost ×12" in the time it took to list it;
+ *   - the live feed recorded every new order at rank 0 regardless of where it
+ *     actually sat, so one feed sighting plus one sweep made "ghost ×2".
+ *
+ * So only a sweep advances it. Other reads may still END a streak when they see
+ * the order undercut (rank > 0), because that is real evidence — but they never
+ * extend one. `rank` is null when position is unknown, as it is for the feed.
  */
+export interface RecordOptions {
+  /** True only for a sweep. Watchlist refreshes and the live feed pass false. */
+  countsAsSweep?: boolean;
+  seenAt?: string;
+}
+
 export function recordOrders(
   db: Db,
-  orders: Array<{ order: WfmOrder; rank: number }>,
-  seenAt = new Date().toISOString(),
+  orders: Array<{ order: WfmOrder; rank: number | null }>,
+  opts: RecordOptions | string = {},
 ): void {
+  // Accepts the old positional seenAt too, so existing callers keep working.
+  const o = typeof opts === "string" ? { seenAt: opts } : opts;
+  const countsAsSweep = o.countsAsSweep ?? true;
+  const seenAt = o.seenAt ?? new Date().toISOString();
   const stmt = db.prepare(
     `INSERT INTO order_seen
        (order_id, item_id, user_id, ingame_name, type, platinum, variant,
@@ -215,13 +235,18 @@ export function recordOrders(
        variant        = excluded.variant,
        last_seen      = excluded.last_seen,
        sightings      = order_seen.sightings + 1,
-       top_rank       = excluded.top_rank,
-       sweeps_at_best = CASE WHEN excluded.top_rank = 0
-                             THEN order_seen.sweeps_at_best + 1
-                             ELSE 0 END,
+       -- An unknown rank (the feed) must not overwrite a known one.
+       top_rank       = COALESCE(excluded.top_rank, order_seen.top_rank),
+       sweeps_at_best = CASE
+         WHEN @counts = 1 AND excluded.top_rank = 0 THEN order_seen.sweeps_at_best + 1
+         WHEN @counts = 1                          THEN 0
+         -- Not a sweep: never extend a streak, but end it on evidence of undercut.
+         WHEN excluded.top_rank > 0                THEN 0
+         ELSE order_seen.sweeps_at_best
+       END,
        left_top_at    = NULL`,
   );
-  db.transaction((batch: Array<{ order: WfmOrder; rank: number }>) => {
+  db.transaction((batch: Array<{ order: WfmOrder; rank: number | null }>) => {
     for (const { order, rank } of batch) {
       stmt.run({
         order_id: order.id,
@@ -235,7 +260,8 @@ export function recordOrders(
         updated_at: order.updatedAt,
         seen: seenAt,
         rank,
-        at_best: rank === 0 ? 1 : 0,
+        at_best: countsAsSweep && rank === 0 ? 1 : 0,
+        counts: countsAsSweep ? 1 : 0,
       });
     }
   })(orders);

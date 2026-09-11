@@ -41,10 +41,21 @@ export function setMeta(db: Db, key: string, value: string): void {
   ).run(key, value);
 }
 
-export function startSweep(db: Db, kind: "top" | "detail" | "stats"): number {
+export type SweepScope = "full" | "partial";
+
+/**
+ * Start a sweep. Anything that does not cover the whole catalogue must say so
+ * with `partial`, or it becomes "the latest sweep" and the rest of the market
+ * disappears from the ranking, the sniper and stats.
+ */
+export function startSweep(
+  db: Db,
+  kind: "top" | "detail" | "stats",
+  scope: SweepScope = "full",
+): number {
   const info = db
-    .prepare("INSERT INTO sweep (kind, started_at) VALUES (?, ?)")
-    .run(kind, new Date().toISOString());
+    .prepare("INSERT INTO sweep (kind, started_at, scope) VALUES (?, ?, ?)")
+    .run(kind, new Date().toISOString(), scope);
   return Number(info.lastInsertRowid);
 }
 

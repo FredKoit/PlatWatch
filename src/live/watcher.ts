@@ -176,9 +176,15 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
       for (const id of keep) seen.add(id);
     }
 
-    // rank 0: these are freshly posted, not observed positions on a book.
     if (fresh.length) {
-      recordOrders(db, fresh.map((order) => ({ order, rank: 0 })));
+      // Position unknown (null), and not a sweep. These used to be recorded at
+      // rank 0, which counted every newly posted order as "cheapest on the book"
+      // and inflated the ghost counter by one for everything the feed saw.
+      recordOrders(
+        db,
+        fresh.map((order) => ({ order, rank: null })),
+        { countsAsSweep: false },
+      );
       // Fold them into the live book BEFORE detecting, then reload. An order
       // cannot trigger on itself — a new ask moves low_sell while a sell is
       // judged against the median — but a cheap ask posted seconds earlier in

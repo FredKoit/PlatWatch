@@ -174,6 +174,29 @@ export const MIGRATIONS: Migration[] = [
       addColumn(db, "stat_summary", "last_traded_at", "TEXT");
     },
   },
+  {
+    version: 7,
+    name: "sweep.scope",
+    up(db) {
+      // latestSweepId picked the newest finished sweep of any size. A watchlist
+      // refresh or `ingest sweep --limit` produced a sweep of a few items, which
+      // then became "the market": the ranking, the sniper and stats all saw
+      // only those items.
+      addColumn(db, "sweep", "scope", "TEXT NOT NULL DEFAULT 'full'");
+
+      // Classify history by what each sweep actually covered. Real full sweeps
+      // reached 94-100% (a few items legitimately have no book); anything under
+      // half was a partial run or a crash.
+      if (tableExists(db, "sweep") && tableExists(db, "snapshot") && tableExists(db, "item")) {
+        db.exec(`
+          UPDATE sweep SET scope = 'partial'
+           WHERE kind = 'top'
+             AND (SELECT COUNT(DISTINCT item_id) FROM snapshot WHERE sweep_id = sweep.id)
+               < 0.5 * (SELECT COUNT(*) FROM item)
+        `);
+      }
+    },
+  },
 ];
 
 export interface MigrationResult {

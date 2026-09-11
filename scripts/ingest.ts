@@ -74,17 +74,28 @@ async function runSweep() {
   const limit = flag("limit");
   if (limit) items = items.slice(0, Number(limit));
 
+  // --limit covers a subset, so it must be marked partial: otherwise it becomes
+  // "the latest sweep" and every other item drops out of the ranking.
+  const scope = limit ? "partial" : "full";
+
   let sweepId: number | undefined;
   if (has("resume")) {
     const row = db
-      .prepare("SELECT id FROM sweep WHERE kind='top' AND finished_at IS NULL ORDER BY id DESC LIMIT 1")
-      .get() as { id: number } | undefined;
+      .prepare(
+        `SELECT id FROM sweep
+          WHERE kind = 'top' AND scope = ? AND finished_at IS NULL
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(scope) as { id: number } | undefined;
     if (row) {
       sweepId = row.id;
       console.log(`resuming sweep #${sweepId}`);
     }
   }
-  sweepId ??= startSweep(db, "top");
+  sweepId ??= startSweep(db, "top", scope);
+  if (scope === "partial") {
+    console.log(`partial sweep (--limit ${limit}): recorded, but never used as the baseline`);
+  }
 
   console.log(`sweeping ${items.length} items (sweep #${sweepId})`);
   const started = Date.now();

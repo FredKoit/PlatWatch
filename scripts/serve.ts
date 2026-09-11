@@ -11,8 +11,7 @@
 import { openDb } from "../src/db/index";
 import { createApp } from "../src/web/server";
 import { watchedItems } from "../src/web/api";
-import { startSweep } from "../src/db/index";
-import { sweepTopOrders } from "../src/ingest/sweep";
+import { refreshWatched } from "../src/ingest/watchlist";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | null => {
@@ -45,12 +44,11 @@ async function refreshWatchlist(): Promise<void> {
   while (!controller.signal.aborted) {
     const items = watchedItems(db);
     if (items.length > 0) {
-      const sweepId = startSweep(db, "top");
       try {
-        const result = await sweepTopOrders(db, items, { sweepId, signal: controller.signal });
-        console.log(
-          `[watchlist] refreshed ${result.ok} item(s) in ${(result.elapsedMs / 1000).toFixed(1)}s`,
-        );
+        // Not a sweep — the daemon and this server share one implementation, so
+        // the two cannot diverge the way their separate copies of this did.
+        const result = await refreshWatched(db, items, { signal: controller.signal });
+        console.log(`[watchlist] refreshed ${result.ok} item(s), ${result.liveUpdates} live prices`);
       } catch (err) {
         console.error(`[watchlist] ${err instanceof Error ? err.message : String(err)}`);
       }

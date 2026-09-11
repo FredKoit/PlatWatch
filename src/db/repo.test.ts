@@ -274,3 +274,37 @@ test("an item with no orders still records that it was visited", () => {
   // Without this row a resumed sweep cannot tell a dead item from an unvisited
   // one, and re-fetches every dead item on every resume.
 });
+
+test("the live feed neither extends a ghost streak nor forgets a known rank", () => {
+  const db = seed();
+  const o = order("o1", "blade", "sell", 10);
+
+  // Two real sweeps at the top of the book.
+  recordOrders(db, [{ order: o, rank: 0 }]);
+  recordOrders(db, [{ order: o, rank: 0 }]);
+
+  // The feed sees it again. It used to record every feed order at rank 0,
+  // which counted each one as "cheapest on the book" whatever its position.
+  recordOrders(db, [{ order: o, rank: null }], { countsAsSweep: false });
+
+  const row = db
+    .prepare("SELECT sweeps_at_best, top_rank, sightings FROM order_seen WHERE order_id='o1'")
+    .get() as { sweeps_at_best: number; top_rank: number | null; sightings: number };
+  assert.equal(row.sweeps_at_best, 2, "a feed sighting is not a sweep");
+  assert.equal(row.top_rank, 0, "an unknown position must not overwrite a known one");
+  assert.equal(row.sightings, 3, "but it still counts as a sighting");
+  db.close();
+});
+
+test("an order first seen on the feed starts with no streak", () => {
+  const db = seed();
+  recordOrders(db, [{ order: order("o1", "blade", "sell", 10), rank: null }], {
+    countsAsSweep: false,
+  });
+  const row = db
+    .prepare("SELECT sweeps_at_best, top_rank FROM order_seen WHERE order_id='o1'")
+    .get() as { sweeps_at_best: number; top_rank: number | null };
+  assert.equal(row.sweeps_at_best, 0, "one feed sighting plus one sweep used to read as ghost ×2");
+  assert.equal(row.top_rank, null);
+  db.close();
+});

@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS sweep (
   started_at   TEXT NOT NULL,
   finished_at  TEXT,
   items_ok     INTEGER NOT NULL DEFAULT 0,
-  items_failed INTEGER NOT NULL DEFAULT 0
+  items_failed INTEGER NOT NULL DEFAULT 0,
+  -- 'full' covers the whole catalogue; 'partial' covers a subset (--limit).
+  -- Only a full sweep may become the baseline: everything that asks for "the
+  -- latest sweep" treats its rows as the whole market, and a 250-item sweep
+  -- read that way makes the other 3,590 items vanish.
+  scope        TEXT NOT NULL DEFAULT 'full'
 );
 
 -- One row per item per sweep: the order book as it stood, reduced to the
