@@ -5,6 +5,8 @@
  * database side lives in query.ts.
  */
 
+import { hoursSinceTrade, MAX_HISTORY_STALE_HOURS } from "./freshness";
+
 export interface RankingPolicy {
   /** Below this, an item cannot be ranked however fat its spread. */
   minVolume48h: number;
@@ -33,8 +35,12 @@ export interface RankingPolicy {
   maxSellAboveTraded: number;
   /** A book older than this is a hypothesis, not a quote. */
   maxBookAgeHours: number;
-  /** History that stopped days ago describes a market that no longer exists. */
-  maxHistoryStaleDays: number;
+  /**
+   * History that stopped describes a market that no longer exists. Measured in
+   * hours from the END of the newest bucket — see rank/freshness.ts for why the
+   * old day-based check emptied the ranking for most of every day.
+   */
+  maxHistoryStaleHours: number;
   minMarginPlat: number;
   /** Guards against 2p on a 200p item, which is noise, not edge. */
   minMarginPct: number;
@@ -59,7 +65,7 @@ export const DEFAULT_POLICY: RankingPolicy = {
   maxSpreadPct: 2,
   maxSellAboveTraded: 1.5,
   maxBookAgeHours: 72,
-  maxHistoryStaleDays: 2,
+  maxHistoryStaleHours: MAX_HISTORY_STALE_HOURS,
   minMarginPlat: 5,
   minMarginPct: 0.08,
   tradeCapacity: 10,
@@ -85,6 +91,8 @@ export interface MarketRow {
   volume7d: number | null;
   daysTraded30d: number | null;
   lastTradedDay: string | null;
+  /** End of the newest hourly bucket; preferred over lastTradedDay when set. */
+  lastTradedAt?: string | null;
   /** Set when a side of this book came from the live feed rather than the sweep. */
   liveAt?: string | null;
   /** Median of completed trades for this variant — what actually gets paid. */
@@ -122,12 +130,6 @@ export interface Opportunity {
   liveAt?: string | null;
 }
 
-/** Days between a YYYY-MM-DD day and now. */
-function daysSince(day: string | null, now: number): number | null {
-  if (!day) return null;
-  return (now - Date.parse(`${day}T00:00:00Z`)) / 86_400_000;
-}
-
 /**
  * Liquidity and freshness gates, shared by both strategies.
  *
@@ -135,7 +137,7 @@ function daysSince(day: string | null, now: number): number | null {
  * is worth seeing, and silent filtering makes a ranking impossible to debug.
  */
 export function gate(
-  row: Pick<MarketRow, "volume48h" | "sellCount" | "bookAgeH" | "lastTradedDay">,
+  row: Pick<MarketRow, "volume48h" | "sellCount" | "bookAgeH" | "lastTradedDay" | "lastTradedAt">,
   policy: RankingPolicy,
   now: number,
 ): string[] {
@@ -148,10 +150,10 @@ export function gate(
   if (row.bookAgeH !== null && row.bookAgeH > policy.maxBookAgeHours)
     rejects.push(`book ${Math.round(row.bookAgeH)}h old`);
 
-  const stale = daysSince(row.lastTradedDay, now);
+  const stale = hoursSinceTrade(row, now);
   if (stale === null) rejects.push("no trade history");
-  else if (stale > policy.maxHistoryStaleDays)
-    rejects.push(`last traded ${stale.toFixed(1)}d ago`);
+  else if (stale > policy.maxHistoryStaleHours)
+    rejects.push(`last traded ${Math.round(stale)}h ago`);
 
   return rejects;
 }

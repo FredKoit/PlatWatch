@@ -148,6 +148,9 @@ CREATE TABLE IF NOT EXISTS stat_summary (
   -- Most recent day with any trade. History can simply stop: an item whose
   -- series ended days ago has no current price, whatever its volume says.
   last_traded_day TEXT,
+  -- End of the newest HOURLY bucket. Prefer this: the daily series covers
+  -- closed days only and is always at least a day behind.
+  last_traded_at  TEXT,
   PRIMARY KEY (item_id, variant)
 );
 

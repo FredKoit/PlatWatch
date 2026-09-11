@@ -37,6 +37,7 @@ export function loadBaselines(db: Db, sweepId: number): Map<string, Baseline> {
               ${LIVE_OVERLAY.liveAt}  AS liveAt,
               s.taken_at AS snapshotAt,
               ss.volume_48h AS volume48h, ss.last_traded_day AS lastTradedDay,
+              ss.last_traded_at AS lastTradedAt,
               ss.median_7d AS median7d
          FROM snapshot s
          JOIN item i ON i.id = s.item_id

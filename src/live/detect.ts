@@ -1,5 +1,6 @@
 import type { WfmOrder, UserStatus } from "../wfm/types";
 import { variantKey } from "../wfm/types";
+import { hoursSinceTrade, MAX_HISTORY_STALE_HOURS } from "../rank/freshness";
 
 /**
  * Deciding whether a freshly posted order is worth whispering about.
@@ -30,6 +31,8 @@ export interface Baseline {
   lowSell: number | null;
   volume48h: number | null;
   lastTradedDay: string | null;
+  /** End of the newest hourly bucket; preferred over lastTradedDay when set. */
+  lastTradedAt?: string | null;
   /** When the baseline sweep ran. */
   snapshotAt: string;
   /** Set when this book was refreshed from the live feed since that sweep. */
@@ -106,11 +109,6 @@ function hoursBetween(iso: string, now: number): number {
   return (now - Date.parse(iso)) / 3_600_000;
 }
 
-function daysSince(day: string | null, now: number): number | null {
-  if (!day) return null;
-  return (now - Date.parse(`${day}T00:00:00Z`)) / 86_400_000;
-}
-
 /**
  * Returns an alert, or null when the order is unremarkable.
  *
@@ -131,8 +129,10 @@ export function detect(
   if (volume < policy.minVolume48h) return null;
 
   // An item whose history stopped has no current price to compare against.
-  const historyAge = daysSince(baseline.lastTradedDay, now);
-  if (historyAge === null || historyAge > 2) return null;
+  // Shared with the ranking via rank/freshness.ts. This used to be its own
+  // day-based copy, and it was silent for most of every day in the same way.
+  const historyAge = hoursSinceTrade(baseline, now);
+  if (historyAge === null || historyAge > MAX_HISTORY_STALE_HOURS) return null;
 
   const baselineAgeH = hoursBetween(baseline.snapshotAt, now);
   if (baselineAgeH > policy.maxBaselineAgeH) return null;

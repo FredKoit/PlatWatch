@@ -4,6 +4,7 @@ import { WfmError } from "../wfm/errors";
 import type { ItemStatistics, StatBucket } from "../wfm/types";
 import { statVariantKey } from "../wfm/types";
 import type { ItemRow } from "./details";
+import { DAILY_PERIOD_MS, HOURLY_PERIOD_MS, periodEnd } from "../rank/freshness";
 
 /**
  * Price history ingestion.
@@ -55,6 +56,13 @@ export interface Summary {
   daysTraded30d: number;
   /** Most recent day with any trade, or null if the item has no history. */
   lastTradedDay: string | null;
+  /**
+   * When the most recent trade had happened by — the END of the newest bucket.
+   * Taken from the hourly series when there is one, because the daily series
+   * only covers closed days and is always at least a day behind. See
+   * rank/freshness.ts for why that distinction emptied the ranking.
+   */
+  lastTradedAt: string | null;
 }
 
 /** Volume-weighted median is overkill here; the daily median of medians is enough. */
@@ -101,6 +109,16 @@ export function summariseByVariant(
     const last30 = within(30);
     const sum = (bs: StatBucket[]) => bs.reduce((n, b) => n + b.volume, 0);
 
+    // Newest by timestamp rather than by array position: the series is
+    // oldest-first in practice, but nothing in the API promises that.
+    const newest = (bs: StatBucket[]) =>
+      bs.reduce<StatBucket | null>(
+        (best, b) => (best === null || Date.parse(b.datetime) > Date.parse(best.datetime) ? b : best),
+        null,
+      );
+    const newestHourly = newest(s.hourly);
+    const newestDaily = newest(s.daily);
+
     out.set(variant, {
       volume48h: sum(s.hourly),
       volume7d: sum(last7),
@@ -109,6 +127,11 @@ export function summariseByVariant(
       median30d: medianOf(last30.map((b) => b.median)),
       daysTraded30d: new Set(last30.map((b) => b.datetime.slice(0, 10))).size,
       lastTradedDay: s.daily.at(-1)?.datetime.slice(0, 10) ?? null,
+      lastTradedAt: newestHourly
+        ? periodEnd(newestHourly.datetime, HOURLY_PERIOD_MS)
+        : newestDaily
+          ? periodEnd(newestDaily.datetime, DAILY_PERIOD_MS)
+          : null,
     });
   }
   return out;
@@ -130,8 +153,9 @@ export function saveStats(db: Db, itemId: string, stats: ItemStatistics): Map<st
   const summaryStmt = db.prepare(
     `INSERT INTO stat_summary
        (item_id, variant, fetched_at, volume_48h, volume_7d, volume_30d,
-        median_7d, median_30d, days_traded_30d, last_traded_day)
-     VALUES (@item_id, @variant, @fetched_at, @v48, @v7, @v30, @m7, @m30, @days, @last_day)
+        median_7d, median_30d, days_traded_30d, last_traded_day, last_traded_at)
+     VALUES (@item_id, @variant, @fetched_at, @v48, @v7, @v30, @m7, @m30, @days, @last_day,
+             @last_at)
      ON CONFLICT(item_id, variant) DO UPDATE SET
        fetched_at = excluded.fetched_at,
        volume_48h = excluded.volume_48h,
@@ -140,7 +164,8 @@ export function saveStats(db: Db, itemId: string, stats: ItemStatistics): Map<st
        median_7d = excluded.median_7d,
        median_30d = excluded.median_30d,
        days_traded_30d = excluded.days_traded_30d,
-       last_traded_day = excluded.last_traded_day`,
+       last_traded_day = excluded.last_traded_day,
+       last_traded_at = excluded.last_traded_at`,
   );
 
   const now = new Date().toISOString();
@@ -169,6 +194,7 @@ export function saveStats(db: Db, itemId: string, stats: ItemStatistics): Map<st
         m30: summary.median30d,
         days: summary.daysTraded30d,
         last_day: summary.lastTradedDay,
+        last_at: summary.lastTradedAt,
       });
     }
   })();

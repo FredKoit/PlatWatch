@@ -28,7 +28,8 @@ const MARKET_COLUMNS = `
   ss.volume_7d    AS volume7d,
   ss.median_7d    AS median7d,
   ss.days_traded_30d AS daysTraded30d,
-  ss.last_traded_day AS lastTradedDay
+  ss.last_traded_day AS lastTradedDay,
+  ss.last_traded_at  AS lastTradedAt
 `;
 
 /** Every item with a two-sided book in this sweep. */

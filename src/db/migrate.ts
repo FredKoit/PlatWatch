@@ -159,6 +159,21 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: "stat_summary.last_traded_at",
+    up(db) {
+      // last_traded_day came from the daily series, which only ever covers
+      // closed days, and was measured from the START of that day. Against a
+      // two-day limit that rejected every item from midnight UTC until the next
+      // stats fetch — the ranking was empty most of the day. The hourly series
+      // is current to within the hour; this holds the end of its newest bucket.
+      //
+      // Existing rows stay NULL and fall back to the end of their daily bucket
+      // (see rank/freshness.ts) until the next stats run fills them in.
+      addColumn(db, "stat_summary", "last_traded_at", "TEXT");
+    },
+  },
 ];
 
 export interface MigrationResult {
