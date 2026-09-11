@@ -18,6 +18,7 @@ import { limiter } from "../src/wfm/http";
 import { itemsToSweep, sweepTopOrders } from "../src/ingest/sweep";
 import { ingestStats, statsCandidates } from "../src/ingest/stats";
 import { refreshWatched } from "../src/ingest/watchlist";
+import { ingestSetDetails, setRootsMissingParts } from "../src/ingest/details";
 import { loadCatalog } from "../src/wfm/catalog";
 import { upsertCatalog } from "../src/db/repo";
 import { runScheduler, type Job } from "../src/daemon/scheduler";
@@ -56,6 +57,26 @@ const jobs: Job[] = [
       const { items, version, fromCache } = await loadCatalog(signal);
       upsertCatalog(db, items);
       log("catalog", `${items.length} items @ ${version}${fromCache ? " (cached)" : ""}`);
+    },
+  },
+  {
+    // New prime sets arrive with the catalogue but without their part lists,
+    // and the daemon used to never fetch those — so a new set could never be
+    // considered for set arbitrage. This only touches sets still missing
+    // parts, so on a normal day it makes no requests at all.
+    name: "details",
+    group: "bulk",
+    everyMs: 1 * HOUR,
+    async run(signal) {
+      const missing = setRootsMissingParts(db);
+      if (missing.length === 0) return;
+      log("details", `${missing.length} set(s) missing their part list: ${missing.map((m) => m.slug).join(", ")}`);
+      const result = await ingestSetDetails(db, undefined, signal, { onlyMissing: true });
+      log(
+        "details",
+        `${result.sets} set(s), ${result.parts} part(s), ${result.failed} failed` +
+          (result.multiQtyParts ? ` · ${result.multiQtyParts} need 2+ per set` : ""),
+      );
     },
   },
   {

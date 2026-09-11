@@ -43,12 +43,48 @@ export interface DetailResult {
  * pass, because only sets and their parts need `quantityInSet`. Cached by the
  * catalogue version, so it re-runs about monthly.
  */
+/**
+ * Set roots with no component edges yet — new sets from a Prime Access, or
+ * ones whose earlier fetch failed.
+ *
+ * A set whose detail was fetched recently is skipped even if it still has no
+ * edges, so one that genuinely lists no parts is retried daily rather than on
+ * every run.
+ */
+export function setRootsMissingParts(db: Db, retryAfterHours = 24): ItemRow[] {
+  const withEdges = new Set(
+    (db.prepare("SELECT DISTINCT set_id FROM item_part").all() as Array<{ set_id: string }>).map(
+      (r) => r.set_id,
+    ),
+  );
+  const recent = new Set(
+    (
+      db
+        .prepare(
+          `SELECT id FROM item
+            WHERE detail_fetched_at IS NOT NULL
+              AND detail_fetched_at > datetime('now', ?)`,
+        )
+        .all(`-${retryAfterHours} hours`) as Array<{ id: string }>
+    ).map((r) => r.id),
+  );
+  return findSetRoots(db).filter((r) => !withEdges.has(r.id) && !recent.has(r.id));
+}
+
 export async function ingestSetDetails(
   db: Db,
   onProgress?: DetailProgress,
   signal?: AbortSignal,
+  opts: {
+    /**
+     * Only sets with no part edges. The daemon runs this hourly: on a normal
+     * day it costs no requests at all, and when a Prime Access lands it picks
+     * up the new sets within the hour instead of never.
+     */
+    onlyMissing?: boolean;
+  } = {},
 ): Promise<DetailResult> {
-  const setRoots = findSetRoots(db);
+  const setRoots = opts.onlyMissing ? setRootsMissingParts(db) : findSetRoots(db);
   const slugById = new Map(
     (db.prepare("SELECT id, slug FROM item").all() as Array<{ id: string; slug: string }>).map(
       (r) => [r.id, r.slug],
