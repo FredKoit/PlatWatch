@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Alert } from "./detect";
 
 /**
@@ -34,10 +37,96 @@ export const consoleSink: Sink = {
   name: "console",
   async send(alert) {
     const stamp = new Date().toLocaleTimeString();
-    // \x07 rings the terminal bell — the point is to notice within minutes.
-    process.stdout.write(`\x07\n[${stamp}] ${formatAlert(alert)}\n    ${alert.whisper}\n`);
+    // \x07 rings the terminal bell — the point is to notice within minutes. But
+    // only in a real terminal: run unattended, stdout is a log file, and the
+    // bell is just a control character nobody will ever hear.
+    const bell = process.stdout.isTTY ? "\x07" : "";
+    process.stdout.write(`${bell}\n[${stamp}] ${formatAlert(alert)}\n    ${alert.whisper}\n`);
   },
 };
+
+/** The two lines of a toast for a batch of alerts. Pure, so it can be tested. */
+export function toastContent(alerts: Alert[]): { title: string; body: string } {
+  // Lead with the best genuine find; a suspicious one only leads if it is all
+  // there is, since it is more often a typo or bait than an opportunity.
+  const best = [...alerts].sort(
+    (a, b) => Number(a.suspicious) - Number(b.suspicious) || b.profit - a.profit,
+  )[0]!;
+  const verb = best.kind === "underpriced_sell" ? "Buy" : "Sell";
+  const headline = `${verb} ${best.name} @ ${best.platinum}p (+${best.profit}p)`;
+  const detail =
+    `vs ${best.reference}p · vol ${best.volume48h}/48h · ${best.ingameName}` +
+    (best.suspicious ? " · suspicious: likely a mistake or bait" : "");
+
+  if (alerts.length === 1) return { title: headline, body: detail };
+  return {
+    title: `${alerts.length} new PlatWatch alerts`,
+    body: `Best: ${headline} — ${detail}`,
+  };
+}
+
+/**
+ * Windows toast notifications — the channel that works when nobody is at a
+ * terminal.
+ *
+ * Run from Task Scheduler, the daemon's stdout is a log file, so without this
+ * every alert went nowhere anyone would see it. The sniper exists because an
+ * underpriced listing is gone within minutes; a notification in a log file is
+ * the same as none.
+ *
+ * Alerts are batched for a few seconds so a burst becomes one toast rather than
+ * a stack of them. Clicking a toast opens the UI, where the whisper can be
+ * copied — it is deliberately not put on the clipboard for you.
+ */
+export function toastSink(opts: {
+  url: string;
+  batchMs?: number;
+  /** Injectable for tests; defaults to running scripts/toast.ps1. */
+  show?: (content: { title: string; body: string }, url: string) => void;
+}): Sink {
+  const batchMs = opts.batchMs ?? 3_000;
+  const show = opts.show ?? showToast;
+  let pending: Alert[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const flush = () => {
+    timer = null;
+    if (pending.length === 0) return;
+    const batch = pending;
+    pending = [];
+    show(toastContent(batch), opts.url);
+  };
+
+  return {
+    name: "toast",
+    async send(alert) {
+      pending.push(alert);
+      if (!timer) timer = setTimeout(flush, batchMs);
+    },
+  };
+}
+
+const TOAST_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "toast.ps1");
+
+/**
+ * Hand the text to scripts/toast.ps1 through environment variables — never on
+ * the command line. Item and player names come from warframe.market, and one
+ * spliced into a PowerShell command could run code on this machine.
+ */
+function showToast(content: { title: string; body: string }, url: string): void {
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", TOAST_SCRIPT],
+    {
+      env: { ...process.env, PW_TITLE: content.title, PW_BODY: content.body, PW_URL: url },
+      windowsHide: true,
+      stdio: "ignore",
+    },
+  );
+  // A missing PowerShell must not take the daemon down with it.
+  child.on("error", () => {});
+  child.unref();
+}
 
 /**
  * Discord webhook. Set DISCORD_WEBHOOK_URL to enable.
