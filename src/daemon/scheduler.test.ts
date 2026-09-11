@@ -10,8 +10,23 @@ test("a job that has never run is due at startup", () => {
   assert.equal(isDue(null, 6 * HOUR, NOW), true);
 });
 
-test("a job can opt out of running at startup", () => {
-  assert.equal(isDue(null, 6 * HOUR, NOW, false), false);
+test("a job can wait one interval before its first run", () => {
+  const started = NOW;
+  assert.equal(isDue(null, 5 * 60_000, started, false, started), false, "not at startup");
+  assert.equal(
+    isDue(null, 5 * 60_000, started + 5 * 60_000, false, started),
+    true,
+    "but once one interval has passed, it runs",
+  );
+});
+
+test("regression: waiting for the first run is not the same as never running", () => {
+  // The old check returned false whenever there was no last run. A job that
+  // never runs never records one, so the watchlist refresh was never due —
+  // from the day it was written. This test used to assert only the first half.
+  const started = NOW;
+  const muchLater = started + 30 * 24 * HOUR;
+  assert.equal(isDue(null, 5 * 60_000, muchLater, false, started), true);
 });
 
 test("a job is not due again until its interval has passed", () => {
@@ -153,6 +168,28 @@ test("independent jobs overlap rather than queueing behind each other", async ()
   await new Promise((r) => setTimeout(r, 100));
 
   assert.ok(sawBothAtOnce, "a short refresh must not wait out a long crawl");
+  controller.abort();
+  await loop;
+  db.close();
+});
+
+test("a job that waits for its first interval does eventually run", async () => {
+  // The end-to-end version: through runScheduler, not just isDue.
+  const db = openDb(":memory:");
+  const controller = new AbortController();
+  let runs = 0;
+  const loop = runScheduler(
+    db,
+    [{ name: "watchlist", everyMs: 40, runOnFirstStart: false, run: async () => void runs++ }],
+    { signal: controller.signal, tickMs: 5 },
+  );
+
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(runs, 0, "it waits at startup");
+
+  await new Promise((r) => setTimeout(r, 60));
+  assert.ok(runs >= 1, "and then it runs — the old scheduler never ran it at all");
+
   controller.abort();
   await loop;
   db.close();

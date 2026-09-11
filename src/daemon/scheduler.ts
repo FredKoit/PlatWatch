@@ -35,13 +35,24 @@ export function markRun(db: Db, name: string, at = new Date().toISOString()): vo
   setMeta(db, key(name), at);
 }
 
+/**
+ * Whether a job should run now.
+ *
+ * `runOnFirstStart: false` means "wait one interval before the first run" —
+ * NOT "never run". It used to return false whenever there was no last run, and
+ * since a job that never runs never records one, such a job was never due. The
+ * watchlist refresh sat in that state from the day it was written: starred
+ * items were never refreshed, silently. With no last run, the interval is now
+ * counted from when the scheduler started instead.
+ */
 export function isDue(
   last: string | null,
   everyMs: number,
   now: number,
   runOnFirstStart = true,
+  startedAt = now,
 ): boolean {
-  if (last === null) return runOnFirstStart;
+  if (last === null) return runOnFirstStart || now - startedAt >= everyMs;
   const at = Date.parse(last);
   if (Number.isNaN(at)) return true;
   return now - at >= everyMs;
@@ -65,6 +76,8 @@ export interface SchedulerOptions {
  */
 export async function runScheduler(db: Db, jobs: Job[], opts: SchedulerOptions): Promise<void> {
   const tickMs = opts.tickMs ?? 30_000;
+  // The reference point for jobs that wait one interval before their first run.
+  const startedAt = Date.now();
   const running = new Set<string>();
   const groupOf = (job: Job) => job.group ?? job.name;
 
@@ -93,7 +106,7 @@ export async function runScheduler(db: Db, jobs: Job[], opts: SchedulerOptions):
     const now = Date.now();
     for (const job of jobs) {
       if (running.has(groupOf(job))) continue;
-      if (isDue(lastRun(db, job.name), job.everyMs, now, job.runOnFirstStart ?? true)) {
+      if (isDue(lastRun(db, job.name), job.everyMs, now, job.runOnFirstStart ?? true, startedAt)) {
         launch(job);
       }
     }
