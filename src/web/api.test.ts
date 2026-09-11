@@ -8,11 +8,15 @@ import {
   pendingWhispers,
   resolveWhisper,
   sellerStats,
+  priceHistory,
   setArbitrage,
   setWatched,
   status,
+  tradePlan,
   watchedItems,
 } from "./api";
+import { closeTrade, listTrades, openTrade, setTradeTarget } from "../trade/journal";
+import { evaluatePositions, openPositions, unsentSignals } from "../trade/exits";
 import type { WfmItemSummary } from "../wfm/types";
 
 const item = (id: string, slug: string, tags: string[] = []): WfmItemSummary => ({
@@ -220,13 +224,14 @@ test("set arbitrage offers each component's seller, not the set's", () => {
   stat("blade", 30);
   stat("handle", 20);
 
+  // Every order carries its quantity; these sellers each hold enough for a set.
   const ord = (oid: string, item: string, plat: number, who: string) =>
     db
       .prepare(
         `INSERT INTO order_seen (order_id, item_id, user_id, ingame_name, type, platinum,
                                  variant, created_at, updated_at, first_seen, last_seen,
-                                 sightings, top_rank, sweeps_at_best)
-         VALUES (?, ?, ?, ?, 'sell', ?, '', ?, ?, ?, ?, 1, 0, 1)`,
+                                 sightings, top_rank, sweeps_at_best, quantity, user_status)
+         VALUES (?, ?, ?, ?, 'sell', ?, '', ?, ?, ?, ?, 1, 0, 1, 5, 'ingame')`,
       )
       .run(oid, item, who, who, plat, nowIso, nowIso, nowIso, nowIso);
   ord("o-set", "kamas", 200, "SetSeller");
@@ -256,8 +261,18 @@ interface SetSpec {
   ask: number;
   traded: number | null;
   volume?: number;
-  /** A part with a null ask has no order anywhere, so it is unpriced. */
-  parts: Array<{ id: string; qty: number; ask: number | null }>;
+  /**
+   * A part with a null ask has no order anywhere, so it is unpriced. `units` is
+   * how many the seller holds (default 5, enough for any set); `more` adds
+   * further sellers up the book.
+   */
+  parts: Array<{
+    id: string;
+    qty: number;
+    ask: number | null;
+    units?: number;
+    more?: Array<{ ask: number; units: number; status?: string; feedOnly?: boolean }>;
+  }>;
 }
 
 /** One finished sweep holding these sets, each priced part with a live seller at its ask. */
@@ -288,8 +303,8 @@ function setsDb(specs: SetSpec[]): Db {
   const sell = db.prepare(
     `INSERT INTO order_seen (order_id, item_id, user_id, ingame_name, type, platinum,
                              variant, created_at, updated_at, first_seen, last_seen,
-                             sightings, top_rank, sweeps_at_best)
-     VALUES (?, ?, ?, ?, 'sell', ?, '', ?, ?, ?, ?, 1, 0, 1)`,
+                             sightings, top_rank, sweeps_at_best, quantity, user_status)
+     VALUES (?, ?, ?, ?, 'sell', ?, '', ?, ?, ?, ?, 1, ?, 1, ?, ?)`,
   );
 
   for (const s of specs) {
@@ -302,7 +317,14 @@ function setsDb(specs: SetSpec[]): Db {
       if (p.ask === null) continue;
       snap.run(p.id, nowIso, p.ask, p.ask);
       const who = `${p.id}Seller`;
-      sell.run(`o-${p.id}`, p.id, who, who, p.ask, nowIso, nowIso, nowIso, nowIso);
+      sell.run(`o-${p.id}`, p.id, who, who, p.ask, nowIso, nowIso, nowIso, nowIso, 0, p.units ?? 5, "ingame");
+      (p.more ?? []).forEach((m, k) => {
+        const other = `${p.id}Seller${k + 2}`;
+        // A feed-only sighting has no book position — and an old one no longer counts.
+        const seen = m.feedOnly ? new Date(Date.now() - 3_600_000).toISOString() : nowIso;
+        sell.run(`o-${p.id}-${k}`, p.id, other, other, m.ask, seen, seen, seen, seen,
+          m.feedOnly ? null : k + 1, m.units, m.status ?? "ingame");
+      });
     }
   }
   return db;
@@ -431,5 +453,188 @@ test("the capital cap holds back sets whose parts cost more than you have", () =
     (r) => r.name === "big set",
   )!;
   assert.ok(big.rejects.some((x) => x.includes("up front")), `got ${JSON.stringify(big.rejects)}`);
+  db.close();
+});
+
+// ── what you can actually buy ───────────────────────────────────────────────
+
+test("a part the cheapest seller cannot supply in full is bought up the book", () => {
+  // Two blades needed; the cheapest seller holds one, the next asks 34p.
+  const db = setsDb([
+    {
+      id: "kamas",
+      ask: 150,
+      traded: 150,
+      parts: [
+        { id: "blade", qty: 2, ask: 30, units: 1, more: [{ ask: 34, units: 3 }] },
+        { id: "handle", qty: 1, ask: 20 },
+      ],
+    },
+  ]);
+  const r = setArbitrage(db).rows[0]!;
+  const blade = r.parts.find((p) => p.name === "kamas blade")!;
+  assert.equal(blade.subtotal, 64, "30 + 34, not the unbuyable 30 × 2");
+  assert.equal(r.buyAt, 84, "the set's cost is what the book actually charges");
+  assert.equal(r.parts.reduce((n, p) => n + p.subtotal!, 0), r.buyAt, "and the lines still add up");
+  assert.deepEqual(
+    blade.fills.map((f) => [f.seller.ingameName, f.units, f.platinum]),
+    [["bladeSeller", 1, 30], ["bladeSeller2", 1, 34]],
+    "two sellers, one whisper each",
+  );
+  assert.ok(blade.fills[1]!.whisper.includes("for 34 platinum"));
+  db.close();
+});
+
+test("a set whose parts cannot be bought in full is held back as short, not priced", () => {
+  const db = setsDb([
+    { id: "kamas", ask: 150, traded: 150, parts: [{ id: "blade", qty: 2, ask: 30, units: 1 }] },
+  ]);
+  assert.equal(setArbitrage(db).rows.length, 0, "never offered as tradable");
+  const r = setArbitrage(db, { includeHeldBack: true }).rows[0]!;
+  assert.equal(r.unpriced, 1);
+  assert.ok(r.rejects.some((x) => x.includes("only 1 of 2 kamas blade")), `got ${JSON.stringify(r.rejects)}`);
+  assert.equal(r.parts[0]!.available, 1);
+  assert.equal(r.parts[0]!.subtotal, null);
+  db.close();
+});
+
+test("an offline seller, or a feed sighting past its window, is neither priced nor offered", () => {
+  // Cheaper asks exist, but one owner is offline and the other was only seen
+  // on the feed an hour ago — the kind of row that used to be offered.
+  const db = setsDb([
+    {
+      id: "rhino",
+      ask: 100,
+      traded: 100,
+      parts: [
+        {
+          id: "chassis",
+          qty: 1,
+          ask: 60,
+          more: [
+            { ask: 20, units: 1, status: "offline" },
+            { ask: 25, units: 1, feedOnly: true },
+          ],
+        },
+      ],
+    },
+  ]);
+  const part = setArbitrage(db).rows[0]!.parts[0]!;
+  assert.equal(part.each, 60);
+  assert.equal(part.seller?.ingameName, "chassisSeller");
+  db.close();
+});
+
+// ── the budget plan ─────────────────────────────────────────────────────────
+
+test("the plan fits the ranked trades to your budget, one per item, within the per-item limit", () => {
+  const db = setsDb([
+    { id: "big", ask: 241, traded: 250, parts: [{ id: "bigpart", qty: 1, ask: 200 }] },
+    { id: "mid", ask: 101, traded: 100, parts: [{ id: "midpart", qty: 1, ask: 70 }] },
+    { id: "small", ask: 36, traded: 40, parts: [{ id: "smallpart", qty: 1, ask: 20 }] },
+  ]);
+  const p = tradePlan(db, { budget: 120, maxPerItem: 150, sortBy: "profit", minConfidence: "low" });
+  assert.deepEqual(p.picks.map((x) => x.name), ["mid set", "small set"]);
+  assert.equal(p.spent, 90);
+  assert.equal(p.skipped.overCap, 1, "the 200p set breaks the per-item limit");
+  assert.ok(p.picks[0]!.parts, "picks are full rows: the shopping list comes with them");
+  db.close();
+});
+
+test("the plan counts what you already hold against an item's limit", () => {
+  const db = setsDb([
+    { id: "mid", ask: 101, traded: 100, parts: [{ id: "midpart", qty: 1, ask: 70 }] },
+  ]);
+  openTrade(db, { itemId: "mid", buyPrice: 90, source: "set" });
+  const p = tradePlan(db, { budget: 500, maxPerItem: 150, minConfidence: "low" });
+  assert.equal(p.picks.length, 0, "90p already in it; another 70p would make 160p");
+  assert.equal(p.skipped.held, 1);
+  db.close();
+});
+
+// ── results-based ranking ───────────────────────────────────────────────────
+
+test("your closed trades re-rank a strategy, and every row says by how much", () => {
+  const db = setsDb([
+    { id: "big", ask: 241, traded: 250, parts: [{ id: "bigpart", qty: 1, ask: 200 }] },
+  ]);
+  const before = opportunities(db)[0]!;
+  assert.equal(before.calibration, null, "no record, no adjustment");
+  assert.equal(before.expectedMargin, before.margin);
+
+  // Ten set trades that each made half of what was predicted.
+  for (let i = 0; i < 10; i++) {
+    const id = openTrade(db, { itemId: "big", buyPrice: 200, expectedSell: 240, expectedMargin: 40, source: "set" });
+    closeTrade(db, id, { sellPrice: 220 });
+  }
+  const after = opportunities(db)[0]!;
+  assert.equal(after.calibration?.factor, 0.75, "halfway to the realised 0.5, at ten trades");
+  assert.equal(after.expectedMargin, 30);
+  assert.equal(after.margin, 40, "the prediction itself is left alone");
+  db.close();
+});
+
+// ── exits ───────────────────────────────────────────────────────────────────
+
+test("an open position carries its exit signals, and each is sent once", () => {
+  const db = setsDb([
+    { id: "rhino", ask: 100, traded: 100, parts: [{ id: "chassis", qty: 1, ask: 60 }] },
+  ]);
+  const id = openTrade(db, { itemId: "rhino", buyPrice: 70, expectedSell: 99, targetPrice: 95, source: "set" });
+  db.prepare(
+    `INSERT INTO order_seen (order_id, item_id, user_id, ingame_name, type, platinum, variant,
+                             created_at, updated_at, first_seen, last_seen, sightings, top_rank,
+                             sweeps_at_best, quantity, user_status)
+     VALUES ('bid1', 'rhino', 'b', 'Buyer', 'buy', 97, '', ?, ?, ?, ?, 1, 0, 0, 1, 'ingame')`,
+  ).run(nowIso, nowIso, nowIso, nowIso);
+
+  const t = listTrades(db).find((x) => x.id === id)!;
+  assert.equal(t.targetPrice, 95);
+  assert.deepEqual(t.exits.map((s) => s.kind), ["target_bid"]);
+  assert.equal(t.exits[0]!.buyer?.ingameName, "Buyer");
+
+  const positions = openPositions(db);
+  assert.equal(unsentSignals(db, evaluatePositions(db, positions)).length, 1);
+  assert.equal(
+    unsentSignals(db, evaluatePositions(db, positions)).length,
+    0,
+    "not repeated every five minutes",
+  );
+
+  // A better bid is news; so is the same bid against a new target.
+  db.prepare("UPDATE order_seen SET platinum = 99 WHERE order_id = 'bid1'").run();
+  assert.equal(unsentSignals(db, evaluatePositions(db, positions)).length, 1);
+  setTradeTarget(db, id, 98);
+  assert.equal(unsentSignals(db, evaluatePositions(db, openPositions(db))).length, 1);
+  db.close();
+});
+
+test("the items you hold are refreshed with the watchlist, so their exits read a fresh book", () => {
+  const db = setsDb([{ id: "rhino", ask: 100, traded: 100, parts: [{ id: "chassis", qty: 1, ask: 60 }] }]);
+  assert.deepEqual(watchedItems(db), []);
+  const id = openTrade(db, { itemId: "rhino", buyPrice: 70 });
+  assert.deepEqual(watchedItems(db).map((i) => i.id), ["rhino"]);
+  closeTrade(db, id, { sellPrice: 90 });
+  assert.deepEqual(watchedItems(db), [], "and stop being refreshed once sold");
+  db.close();
+});
+
+// ── price history ───────────────────────────────────────────────────────────
+
+test("price history returns the item's daily series and which way it is moving", () => {
+  const db = setsDb([{ id: "rhino", ask: 100, traded: 90, parts: [{ id: "chassis", qty: 1, ask: 60 }] }]);
+  db.prepare("UPDATE stat_summary SET median_30d = 100 WHERE item_id = 'rhino'").run();
+  const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const ins = db.prepare(
+    "INSERT INTO stat_daily (item_id, day, variant, volume, median, min_price, max_price) VALUES ('rhino', ?, '', ?, ?, ?, ?)",
+  );
+  ins.run(day(3), 12, 92, 80, 105);
+  ins.run(day(1), 9, 88, 85, 95);
+  ins.run(day(200), 5, 150, 140, 160); // outside the window
+
+  const h = priceHistory(db, "rhino")!;
+  assert.deepEqual(h.days.map((d) => d.median), [92, 88], "oldest first, inside the window only");
+  assert.equal(h.trend, -0.1, "90p this week against 100p over the month");
+  assert.equal(priceHistory(db, "nope"), null);
   db.close();
 });

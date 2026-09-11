@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toastContent, toastSink } from "./notify";
+import { noticeToastContent, toastContent, toastSink } from "./notify";
 import type { Alert } from "./detect";
 
 const alert = (over: Partial<Alert> = {}): Alert => ({
@@ -97,4 +97,24 @@ test("the click opens the PlatWatch UI", async () => {
   await sink.send(alert());
   await sleep(20);
   assert.equal(opened, "http://127.0.0.1:5173");
+});
+
+test("an exit notice on something you hold is never folded into a batch of market alerts", async () => {
+  const shown: Array<{ title: string; body: string }> = [];
+  const sink = toastSink({ url: "u", batchMs: 15, show: (c) => shown.push(c) });
+  await sink.send(alert());
+  await sink.send(alert({ orderId: "o2" }));
+  await sink.notify!({ title: "Sell Rhino Prime Set now: Buyer bids 52p", body: "at or above your 50p target" });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(shown.length, 2, "one toast for the alerts, one for the position");
+  assert.equal(shown[1]!.title, "Sell Rhino Prime Set now: Buyer bids 52p");
+});
+
+test("several notices together say how many, led by the first", () => {
+  const c = noticeToastContent([
+    { title: "A undercut at 40p", body: "2 listed below your 45p target" },
+    { title: "B is sitting unsold", body: "held 4.0d" },
+  ]);
+  assert.equal(c.title, "2 updates on positions you hold");
+  assert.match(c.body, /^A undercut at 40p/);
 });

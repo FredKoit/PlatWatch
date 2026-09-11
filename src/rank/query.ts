@@ -1,6 +1,7 @@
 import type { Db } from "../db/index";
-import type { MarketRow, SetInput } from "./score";
+import type { MarketRow, SetInput, SetPartInput } from "./score";
 import { LIVE_OVERLAY, liveCutoff } from "../live/book";
+import { bookReader, fillFromBook } from "./depth";
 
 /**
  * The most recent completed FULL sweep — the baseline the ranking, the sniper
@@ -38,6 +39,7 @@ const MARKET_COLUMNS = `
   ss.volume_48h   AS volume48h,
   ss.volume_7d    AS volume7d,
   ss.median_7d    AS median7d,
+  ss.median_30d   AS median30d,
   ss.days_traded_30d AS daysTraded30d,
   ss.last_traded_day AS lastTradedDay,
   ss.last_traded_at  AS lastTradedAt
@@ -63,8 +65,11 @@ export function spreadRows(db: Db, sweepId: number): MarketRow[] {
     });
 }
 
-/** Set roots with their components, quantities and each part's ask. */
-export function setRows(db: Db, sweepId: number): SetInput[] {
+/**
+ * Set roots with their components, quantities, each part's ask — and what
+ * buying the full quantity from reachable sellers actually costs.
+ */
+export function setRows(db: Db, sweepId: number, now = Date.now()): SetInput[] {
   const sets = db
     .prepare(
       `SELECT ${MARKET_COLUMNS}
@@ -96,12 +101,15 @@ export function setRows(db: Db, sweepId: number): SetInput[] {
       WHERE ip.set_id = @setId`,
   );
 
+  const asks = bookReader(db, now);
   return sets.map((set) => ({
     set,
-    parts: partStmt.all({
-      sweep: sweepId,
-      setId: set.itemId,
-      liveCutoff: liveCutoff(),
-    }) as SetInput["parts"],
+    parts: (
+      partStmt.all({
+        sweep: sweepId,
+        setId: set.itemId,
+        liveCutoff: liveCutoff(now),
+      }) as SetPartInput[]
+    ).map((p) => ({ ...p, fill: fillFromBook(asks(p.itemId, "", "sell"), p.qty) })),
   }));
 }

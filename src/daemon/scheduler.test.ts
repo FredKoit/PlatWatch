@@ -69,16 +69,20 @@ test("a due job runs, and is not launched again while still running", async () =
   };
 
   const loop = runScheduler(db, [job], { signal: controller.signal, tickMs: 5 });
-  await new Promise((r) => setTimeout(r, 60));
+  // Aborted in `finally`: a failed assertion must fail the test, not leave the
+  // loop ticking and the whole suite hung.
+  try {
+    await new Promise((r) => setTimeout(r, 60));
 
-  assert.equal(starts, 1, "many ticks passed but the job is still running");
-  release();
-  await new Promise((r) => setTimeout(r, 30));
-  assert.ok(starts > 1, "once finished it becomes eligible again");
-
-  controller.abort();
-  await loop;
-  db.close();
+    assert.equal(starts, 1, "many ticks passed but the job is still running");
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(starts > 1, "once finished it becomes eligible again");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
 });
 
 test("a failing job backs off to its interval instead of retrying tightly", async () => {
@@ -101,15 +105,17 @@ test("a failing job backs off to its interval instead of retrying tightly", asyn
     tickMs: 5,
     onError: (name, err) => errors.push(`${name}:${(err as Error).message}`),
   });
-  await new Promise((r) => setTimeout(r, 60));
+  try {
+    await new Promise((r) => setTimeout(r, 60));
 
-  assert.equal(runs, 1, "a failure must not become a hot loop");
-  assert.deepEqual(errors, ["broken:upstream is down"]);
-  assert.ok(lastRun(db, "broken"), "the attempt is stamped even though it failed");
-
-  controller.abort();
-  await loop;
-  db.close();
+    assert.equal(runs, 1, "a failure must not become a hot loop");
+    assert.deepEqual(errors, ["broken:upstream is down"]);
+    assert.ok(lastRun(db, "broken"), "the attempt is stamped even though it failed");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
 });
 
 test("jobs in the same group never run together", async () => {
@@ -134,14 +140,16 @@ test("jobs in the same group never run together", async () => {
     signal: controller.signal,
     tickMs: 5,
   });
-  await new Promise((r) => setTimeout(r, 120));
+  try {
+    await new Promise((r) => setTimeout(r, 120));
 
-  assert.equal(overlapped, false, "two long crawls must not halve each other's rate");
-  assert.ok(lastRun(db, "sweep") && lastRun(db, "stats"), "both still ran, just in turn");
-
-  controller.abort();
-  await loop;
-  db.close();
+    assert.equal(overlapped, false, "two long crawls must not halve each other's rate");
+    assert.ok(lastRun(db, "sweep") && lastRun(db, "stats"), "both still ran, just in turn");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
 });
 
 test("independent jobs overlap rather than queueing behind each other", async () => {
@@ -165,32 +173,39 @@ test("independent jobs overlap rather than queueing behind each other", async ()
     signal: controller.signal,
     tickMs: 5,
   });
-  await new Promise((r) => setTimeout(r, 100));
-
-  assert.ok(sawBothAtOnce, "a short refresh must not wait out a long crawl");
-  controller.abort();
-  await loop;
-  db.close();
+  try {
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(sawBothAtOnce, "a short refresh must not wait out a long crawl");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
 });
 
 test("a job that waits for its first interval does eventually run", async () => {
   // The end-to-end version: through runScheduler, not just isDue.
+  //
+  // Real timers, so the margins are wide: this used to check at 15ms for a job
+  // due at 40ms, and a busy machine firing the timer late made it fail — and a
+  // failure skipped the abort, leaving the loop ticking and the suite hung.
   const db = openDb(":memory:");
   const controller = new AbortController();
   let runs = 0;
   const loop = runScheduler(
     db,
-    [{ name: "watchlist", everyMs: 40, runOnFirstStart: false, run: async () => void runs++ }],
+    [{ name: "watchlist", everyMs: 1_000, runOnFirstStart: false, run: async () => void runs++ }],
     { signal: controller.signal, tickMs: 5 },
   );
+  try {
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(runs, 0, "it waits at startup");
 
-  await new Promise((r) => setTimeout(r, 15));
-  assert.equal(runs, 0, "it waits at startup");
-
-  await new Promise((r) => setTimeout(r, 60));
-  assert.ok(runs >= 1, "and then it runs — the old scheduler never ran it at all");
-
-  controller.abort();
-  await loop;
-  db.close();
+    await new Promise((r) => setTimeout(r, 1_100));
+    assert.ok(runs >= 1, "and then it runs — the old scheduler never ran it at all");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
 });

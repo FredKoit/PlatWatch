@@ -80,28 +80,39 @@ console.log("\n── set arbitrage uses component quantities ──────
 // prices fell the cost landed on exactly 80p and the gate failed with nothing
 // broken. The invariant is that EVERY set is costed at Σ(part × quantity), so
 // check that directly, across all of them.
+// Sets are now costed by walking the reachable book — two blades from a seller
+// holding one cost the next ask up — so the invariant is that the cost IS the
+// book walk, and can never come in under cheapest × quantity.
 let costed = 0;
 let wrongCost = 0;
+let underFloor = 0;
 let multiQtySets = 0;
 let flatWouldDiffer = 0;
+let deeperThanCheapest = 0;
 for (const input of setInputs) {
   const scored = scoreSet(input);
-  if (!scored || input.parts.some((p) => p.lowSell === null)) continue; // edge unknown
+  const fills = input.parts.map((p) => p.fill);
+  if (!scored || fills.some((f) => !f || f.cost === null)) continue; // edge unknown or short
   costed++;
-  const weighted = input.parts.reduce((n, p) => n + p.lowSell! * p.qty, 0);
-  const flat = input.parts.reduce((n, p) => n + p.lowSell!, 0);
-  if (scored.buyAt !== weighted) wrongCost++;
+  const walked = fills.reduce((n, f) => n + f!.cost!, 0);
+  const cheapest = input.parts.reduce((n, p) => n + p.fill!.fills[0]!.order.platinum * p.qty, 0);
+  const flat = input.parts.reduce((n, p) => n + p.fill!.fills[0]!.order.platinum, 0);
+  if (scored.buyAt !== walked) wrongCost++;
+  if (walked < cheapest) underFloor++;
+  if (walked > cheapest) deeperThanCheapest++;
   if (input.parts.some((p) => p.qty > 1)) {
     multiQtySets++;
-    if (weighted !== flat) flatWouldDiffer++;
+    if (walked !== flat) flatWouldDiffer++;
   }
 }
-check("every set costed at part price × quantity", wrongCost === 0, `${wrongCost} of ${costed} wrong`);
+check("every set costed by walking the reachable book", wrongCost === 0, `${wrongCost} of ${costed} wrong`);
+check("no set costed below cheapest ask × quantity", underFloor === 0, `${underFloor} violations`);
 check(
   "quantities actually change the answer",
   multiQtySets > 0 && flatWouldDiffer > 0,
   `${multiQtySets} sets need 2+ of a part; a flat sum would misprice ${flatWouldDiffer}`,
 );
+console.log(`        ${deeperThanCheapest} sets cost more than cheapest × quantity: a seller held too few`);
 
 const dk = bySlug.get("set:dual_kamas_prime_set");
 if (dk) console.log(`        e.g. Dual Kamas: parts ${dk.buyAt}p, edge ${dk.margin}p today`);

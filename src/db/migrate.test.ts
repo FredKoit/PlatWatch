@@ -139,3 +139,38 @@ test("history is classified by what each sweep actually covered", () => {
   ]);
   db.close();
 });
+
+test("order depth and seller status arrive as columns, leaving every observation in place", () => {
+  // A v7 database: order_seen without quantity or status, trade without a target.
+  const db = openDb(":memory:");
+  db.exec(`
+    DROP TABLE exit_alert;
+    CREATE TABLE trade_v7 AS SELECT id, item_id, variant, quantity, buy_price, bought_at, bought_from,
+      sell_price, sold_at, sold_to, expected_sell, expected_margin, source, note FROM trade;
+    DROP TABLE trade; ALTER TABLE trade_v7 RENAME TO trade;
+    CREATE TABLE order_v7 AS SELECT order_id, item_id, user_id, ingame_name, type, platinum, variant,
+      created_at, updated_at, first_seen, last_seen, sightings, top_rank, sweeps_at_best, left_top_at
+      FROM order_seen;
+    DROP TABLE order_seen; ALTER TABLE order_v7 RENAME TO order_seen;
+    PRAGMA user_version = 7;
+  `);
+  db.prepare(
+    `INSERT INTO order_seen VALUES ('o1','i','u','who','sell',30,'','t','t','2026-08-01T00:00:00Z','t',4,0,2,NULL)`,
+  ).run();
+
+  const result = migrate(db);
+  assert.deepEqual(result.applied, ["8:order depth, seller status, trade targets"]);
+  assert.ok(columns(db, "order_seen").includes("quantity"));
+  assert.ok(columns(db, "order_seen").includes("user_status"));
+  assert.ok(columns(db, "trade").includes("target_price"));
+
+  const kept = db.prepare("SELECT first_seen, sightings, quantity FROM order_seen WHERE order_id='o1'").get() as {
+    first_seen: string;
+    sightings: number;
+    quantity: number | null;
+  };
+  assert.equal(kept.first_seen, "2026-08-01T00:00:00Z", "crawl history is never rebuilt");
+  assert.equal(kept.sightings, 4);
+  assert.equal(kept.quantity, null, "unknown until the next sweep re-observes it");
+  db.close();
+});

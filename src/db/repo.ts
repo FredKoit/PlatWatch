@@ -221,14 +221,18 @@ export function recordOrders(
     `INSERT INTO order_seen
        (order_id, item_id, user_id, ingame_name, type, platinum, variant,
         created_at, updated_at, first_seen, last_seen, sightings,
-        top_rank, sweeps_at_best, left_top_at)
+        top_rank, sweeps_at_best, left_top_at, quantity, user_status)
      VALUES (@order_id, @item_id, @user_id, @ingame_name, @type, @platinum, @variant,
              @created_at, @updated_at, @seen, @seen, 1,
-             @rank, @at_best, NULL)
+             @rank, @at_best, NULL, @quantity, @user_status)
      ON CONFLICT(order_id) DO UPDATE SET
        platinum       = excluded.platinum,
        updated_at     = excluded.updated_at,
        ingame_name    = excluded.ingame_name,
+       -- Units sell off an order and owners come and go; the latest sighting
+       -- is the one that says what can be bought now.
+       quantity       = COALESCE(excluded.quantity, order_seen.quantity),
+       user_status    = COALESCE(excluded.user_status, order_seen.user_status),
        -- Must be refreshed, not just inserted: rows first seen before variants
        -- were understood carry an empty key, and without this they keep it
        -- forever — leaving the real asks invisible to any variant-scoped query.
@@ -262,6 +266,8 @@ export function recordOrders(
         rank,
         at_best: countsAsSweep && rank === 0 ? 1 : 0,
         counts: countsAsSweep ? 1 : 0,
+        quantity: Number.isInteger(order.quantity) ? order.quantity : null,
+        user_status: order.user?.status ?? null,
       });
     }
   })(orders);

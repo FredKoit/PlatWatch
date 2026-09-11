@@ -308,3 +308,22 @@ test("an order first seen on the feed starts with no streak", () => {
   assert.equal(row.top_rank, null);
   db.close();
 });
+
+test("an order's quantity and its owner's status are recorded, and follow the latest sighting", () => {
+  const db = seed();
+  const o = { ...order("q1", "blade", "sell", 30), quantity: 3 };
+  recordOrders(db, [{ order: o, rank: 0 }]);
+  const read = () =>
+    db.prepare("SELECT quantity, user_status FROM order_seen WHERE order_id = 'q1'").get() as {
+      quantity: number | null;
+      user_status: string | null;
+    };
+  assert.deepEqual(read(), { quantity: 3, user_status: "ingame" });
+
+  // Two units sold and the seller logged off: the next sighting says so.
+  recordOrders(db, [{ order: { ...o, quantity: 1, user: { ...o.user, status: "offline" } }, rank: null }], {
+    countsAsSweep: false,
+  });
+  assert.deepEqual(read(), { quantity: 1, user_status: "offline" });
+  db.close();
+});

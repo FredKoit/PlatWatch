@@ -34,7 +34,15 @@ import { watchedItems } from "../src/web/api";
 import { latestSweepId } from "../src/rank/query";
 import { watch } from "../src/live/watcher";
 import { DEFAULT_ALERT_POLICY } from "../src/live/detect";
-import { consoleSink, discordSink, fanOut, toastSink, type Sink } from "../src/live/notify";
+import {
+  consoleSink,
+  discordSink,
+  fanOut,
+  fanOutNotices,
+  toastSink,
+  type Sink,
+} from "../src/live/notify";
+import { evaluatePositions, exitNotice, openPositions, unsentSignals } from "../src/trade/exits";
 
 const args = process.argv.slice(2);
 const flag = (n: string): string | null => {
@@ -76,6 +84,19 @@ const port = Number(flag("port") ?? 5173);
 
 const log = (scope: string, msg: string) =>
   console.log(`${new Date().toLocaleTimeString()} [${scope}] ${msg}`);
+
+// ── where alerts go ─────────────────────────────────────────────────────────
+// Shared by the sniper and the exit check, so a signal on something you hold
+// reaches the same toast and the same phone as a market alert.
+const sinks: Sink[] = [consoleSink];
+// Toasts are the channel that works unattended. Run from Task Scheduler the
+// console is a log file, so without this every alert went unseen.
+if (process.platform === "win32" && !has("no-toast")) {
+  sinks.push(toastSink({ url: `http://127.0.0.1:${port}` }));
+}
+const webhook = process.env["DISCORD_WEBHOOK_URL"];
+if (webhook) sinks.push(discordSink(webhook));
+const notice = fanOutNotices(sinks);
 
 // ── jobs ────────────────────────────────────────────────────────────────────
 
@@ -189,20 +210,30 @@ const jobs: Job[] = [
       log("watchlist", `refreshed ${result.ok} item(s), ${result.liveUpdates} live prices`);
     },
   },
+  {
+    // Exit alerts for what you hold: a bid at your target, asks undercutting
+    // it, a position sitting far longer than expected. Reads only the
+    // database — the watchlist job keeps held items' books fresh — so it
+    // costs warframe.market nothing.
+    name: "exits",
+    everyMs: 5 * MINUTE,
+    async run() {
+      const positions = openPositions(db);
+      if (positions.length === 0) return "idle";
+      const fresh = unsentSignals(db, evaluatePositions(db, positions));
+      if (fresh.length === 0) return "idle";
+      const names = new Map(positions.map((p) => [p.tradeId, p.name]));
+      for (const { tradeId, signal } of fresh) {
+        await notice(exitNotice(names.get(tradeId) ?? "position", signal));
+      }
+      log("exits", `${fresh.length} new signal(s) on ${new Set(fresh.map((f) => f.tradeId)).size} position(s)`);
+    },
+  },
 ];
 
 // ── live sniper ─────────────────────────────────────────────────────────────
 
 async function runWatcher(): Promise<void> {
-  const sinks: Sink[] = [consoleSink];
-  // Toasts are the channel that works unattended. Run from Task Scheduler the
-  // console is a log file, so without this every alert went unseen.
-  if (process.platform === "win32" && !has("no-toast")) {
-    sinks.push(toastSink({ url: `http://127.0.0.1:${port}` }));
-  }
-  const webhook = process.env["DISCORD_WEBHOOK_URL"];
-  if (webhook) sinks.push(discordSink(webhook));
-
   // Wait for a baseline before watching: with nothing to compare against, every
   // order looks unremarkable and the poll is wasted.
   while (!controller.signal.aborted && latestSweepId(db) === null) {
@@ -276,7 +307,7 @@ server.listen(port, "127.0.0.1", () => {
 
   log(
     "daemon",
-    `started · sweep 6h · stats daily · retention daily · details hourly · watchlist 5m`,
+    `started · sweep 6h · stats daily · retention daily · details hourly · watchlist + exits 5m`,
   );
   log("daemon", `one rate limiter at 3 req/s shared by every job`);
 });

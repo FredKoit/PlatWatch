@@ -5,11 +5,20 @@ import {
   rank,
   scoreSet,
   scoreSpread,
+  sortKey,
+  trendOf,
   type Opportunity,
   type RankingPolicy,
+  type SetInput,
   type SortBy,
 } from "../rank/score";
 import { whisperFor } from "../live/detect";
+import { liveCutoff } from "../live/book";
+import { REACHABLE_ORDER } from "../rank/depth";
+import { keyOf, planTrades, type Plan, type PlanSort } from "../rank/plan";
+import type { Confidence } from "../rank/timing";
+import { strategyCalibration } from "../trade/journal";
+import { calibrated, type StrategyFactor } from "../trade/calibration";
 
 /**
  * Everything the UI reads. Kept separate from the HTTP layer so the queries can
@@ -26,15 +35,39 @@ export interface Counterparty {
   replyRate: number | null;
 }
 
-/** One component you must acquire to assemble a set. */
-export interface PartOffer {
+/** One seller a part is bought from — more than one when the cheapest has too few. */
+export interface PartFill {
+  seller: Counterparty;
+  units: number;
+  platinum: number;
+  /** The seller's status when last seen: ingame, online, or null if unrecorded. */
+  status: string | null;
+  whisper: string;
+}
+
+/** One line of a set's shopping list. */
+export interface SetPart {
   itemId: string;
   name: string;
   qty: number;
-  price: number | null;
+  /** Cheapest reachable ask per unit. */
+  each: number | null;
+  /**
+   * What the whole quantity costs, bought up the reachable book. The lines
+   * always sum to the set's `buyAt`. Null when too few units are on sale.
+   */
+  subtotal: number | null;
+  /** Units on sale from reachable sellers, up to the quantity needed. */
+  available: number;
+  volume48h: number | null;
+  fills: PartFill[];
+  /** The first fill's seller and whisper — the one to message first. */
   seller: Counterparty | null;
   whisper: string | null;
 }
+
+/** @deprecated The set parts list is a SetPart now; kept so callers keep compiling. */
+export type PartOffer = SetPart;
 
 /**
  * How a row is actually executed.
@@ -64,8 +97,12 @@ export interface Row extends Opportunity {
    * strategy, not a fault.
    */
   lowballWhisper: string | null;
-  /** For "buy-parts": every component, each at its own seller's ask. */
-  parts: PartOffer[] | null;
+  /** For "buy-parts": every component, bought from reachable sellers up the book. */
+  parts: SetPart[] | null;
+  /** Profit per trade once your record for this strategy has had its say. */
+  expectedMargin: number;
+  /** Null until you have closed trades of this strategy. */
+  calibration: StrategyFactor | null;
   watched: boolean;
   /** Age of the price this row is built on. */
   priceAgeH: number | null;
@@ -119,36 +156,77 @@ function counterparty(
   };
 }
 
-/** Best order per side still on the book — whom a whisper would go to. */
-function bestOrderStmt(db: Db) {
-  return db.prepare(
+/**
+ * Best order per side that you could whisper right now — the same reachable
+ * set the set costing walks, so the seller offered is one the row was priced
+ * against. It used to be any order still "on the book", which included
+ * offline sellers and feed sightings hours old.
+ */
+function bestOrderReader(db: Db, now = Date.now()) {
+  const stmt = db.prepare(
     `SELECT user_id, ingame_name, platinum, sweeps_at_best
        FROM order_seen
       WHERE item_id = @itemId AND variant = @variant AND type = @type
-        AND left_top_at IS NULL
+        AND ${REACHABLE_ORDER}
       ORDER BY CASE WHEN @type = 'sell' THEN platinum END ASC,
                CASE WHEN @type = 'buy'  THEN platinum END DESC
       LIMIT 1`,
   );
+  const cutoff = liveCutoff(now);
+  return (itemId: string, variant: string, type: "sell" | "buy") =>
+    stmt.get({ itemId, variant, type, liveCutoff: cutoff }) as OrderRow | undefined;
 }
 
 /**
- * A set component's cheapest live seller, and the whisper that takes their ask.
- * For set arbitrage paying the ask IS the trade, unlike a spread.
+ * A set's shopping list: each part, who it is bought from, and what the full
+ * quantity costs. For set arbitrage paying the ask IS the trade, unlike a
+ * spread, so every whisper offers the seller's own price.
  */
-function componentOffer(
-  bestOrder: ReturnType<typeof bestOrderStmt>,
+function setPartsOf(
+  input: SetInput,
   stats: Map<string, { sent: number; replied: number }>,
-  part: { itemId: string; name: string },
-): { seller: Counterparty | null; whisper: string | null } {
-  const order = bestOrder.get({ itemId: part.itemId, variant: "", type: "sell" }) as
-    | OrderRow
-    | undefined;
-  const seller = counterparty(order, stats);
-  return {
-    seller,
-    whisper: seller ? whisperFor(seller.ingameName, part.name, seller.platinum, "buy") : null,
-  };
+): SetPart[] {
+  return [...input.parts]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map<SetPart>((p) => {
+      const fills: PartFill[] = (p.fill?.fills ?? []).map((f) => ({
+        seller: counterparty(
+          {
+            user_id: f.order.userId,
+            ingame_name: f.order.ingameName,
+            platinum: f.order.platinum,
+            sweeps_at_best: 0,
+          },
+          stats,
+        )!,
+        units: f.units,
+        platinum: f.order.platinum,
+        status: f.order.status,
+        whisper: whisperFor(f.order.ingameName, p.name, f.order.platinum, "buy"),
+      }));
+      return {
+        itemId: p.itemId,
+        name: p.name,
+        qty: p.qty,
+        each: fills[0]?.platinum ?? p.lowSell,
+        subtotal: p.fill ? p.fill.cost : p.lowSell === null ? null : p.lowSell * p.qty,
+        available: p.fill ? p.fill.available : p.lowSell === null ? 0 : p.qty,
+        volume48h: p.volume48h,
+        fills,
+        seller: fills[0]?.seller ?? null,
+        whisper: fills[0]?.whisper ?? null,
+      };
+    });
+}
+
+/** Calibration fields for a row of the given strategy. */
+function calibrationOf(
+  factors: Map<string, StrategyFactor>,
+  kind: string,
+  margin: number,
+): { expectedMargin: number; calibration: StrategyFactor | null } {
+  const f = factors.get(kind);
+  return { expectedMargin: calibrated(margin, f), calibration: f ?? null };
 }
 
 export interface OpportunityQuery {
@@ -170,10 +248,25 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
   };
 
   const all: Array<Opportunity | null> = [];
+  const setInputs = new Map<string, SetInput>();
   if (q.kind !== "set") all.push(...spreadRows(db, sweepId).map((r) => scoreSpread(r, policy)));
-  if (q.kind !== "spread") all.push(...setRows(db, sweepId).map((s) => scoreSet(s, policy)));
+  if (q.kind !== "spread") {
+    for (const s of setRows(db, sweepId)) {
+      setInputs.set(s.set.itemId, s);
+      all.push(scoreSet(s, policy));
+    }
+  }
 
-  const ranked = rank(all, q.sortBy ?? "score");
+  // Results-based ranking: each strategy's order is scaled by what your closed
+  // trades say it really makes. Every sort key is linear in the margin, so
+  // scaling the key is exactly re-ranking on the calibrated margin — and with
+  // no closed trades every factor is 1 and the order is the prediction's.
+  const sortBy = q.sortBy ?? "score";
+  const factors = strategyCalibration(db);
+  const factor = (o: Opportunity) => factors.get(o.kind)?.factor ?? 1;
+  const ranked = rank(all, sortBy).sort(
+    (a, b) => sortKey(b, sortBy) * factor(b) - sortKey(a, sortBy) * factor(a),
+  );
   const stats = sellerStats(db);
 
   const watched = new Set(
@@ -185,17 +278,7 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
     ).map((w) => `${w.item_id}|${w.variant}`),
   );
 
-  const bestOrder = bestOrderStmt(db);
-
-  const partsOf = db.prepare(
-    `SELECT p.id AS itemId, p.name AS name, ip.qty AS qty, ps.low_sell AS price
-       FROM item_part ip
-       JOIN item p ON p.id = ip.part_id
-       LEFT JOIN snapshot ps ON ps.item_id = ip.part_id AND ps.sweep_id = @sweep
-                            AND ps.variant = ''
-      WHERE ip.set_id = @setId
-      ORDER BY p.name`,
-  );
+  const bestOrder = bestOrderReader(db);
 
   const takenAt = db
     .prepare("SELECT taken_at FROM snapshot WHERE sweep_id = ? LIMIT 1")
@@ -205,26 +288,19 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
     : null;
 
   const rows = ranked.slice(0, q.limit ?? 100).map<Row>((o) => {
-    const key = { itemId: o.itemId, variant: o.variant };
-    const sellOrder = bestOrder.get({ ...key, type: "sell" }) as OrderRow | undefined;
+    const sellOrder = bestOrder(o.itemId, o.variant, "sell");
     const seller = counterparty(sellOrder, stats);
-    const buyer = counterparty(bestOrder.get({ ...key, type: "buy" }) as OrderRow, stats);
+    const buyer = counterparty(bestOrder(o.itemId, o.variant, "buy"), stats);
 
     // Set arbitrage acquires components, so a whisper about the assembled set
     // is meaningless — the seller of the set is not who you trade with.
-    const parts =
-      o.kind === "set"
-        ? (partsOf.all({ sweep: sweepId, setId: o.itemId }) as Array<{
-            itemId: string;
-            name: string;
-            qty: number;
-            price: number | null;
-          }>).map<PartOffer>((p) => ({ ...p, ...componentOffer(bestOrder, stats, p) }))
-        : null;
+    const input = o.kind === "set" ? setInputs.get(o.itemId) : undefined;
+    const parts = input ? setPartsOf(input, stats) : null;
 
     return {
       ghostSweeps: sellOrder?.sweeps_at_best ?? 0,
       ...o,
+      ...calibrationOf(factors, o.kind, o.margin),
       seller,
       buyer,
       playKind: o.kind === "set" ? "buy-parts" : "post",
@@ -243,20 +319,6 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
   return q.watchedOnly ? rows.filter((r) => r.watched) : rows;
 }
 
-/** One line of a set's shopping list. */
-export interface SetPart {
-  itemId: string;
-  name: string;
-  qty: number;
-  /** Cheapest ask per unit — the exact price the set's cost is built from. */
-  each: number | null;
-  /** `each × qty`. The lines always sum to the set's `buyAt`. */
-  subtotal: number | null;
-  volume48h: number | null;
-  seller: Counterparty | null;
-  whisper: string | null;
-}
-
 /** A set costed as its parts, against what the assembled set sells for. */
 export interface SetRow extends Opportunity {
   /** Cheapest ask for the assembled set — the one you undercut. */
@@ -269,9 +331,15 @@ export interface SetRow extends Opportunity {
    * ask would promise is not there.
    */
   cappedByTrades: boolean;
-  /** Parts with no ask, which make `buyAt` and `margin` unknown rather than zero. */
+  /**
+   * Parts whose cost is unknown — nobody sells them, or too few units are on
+   * sale from reachable sellers — which make `buyAt` and `margin` unknown
+   * rather than zero.
+   */
   unpriced: number;
   parts: SetPart[];
+  expectedMargin: number;
+  calibration: StrategyFactor | null;
 }
 
 export type SetSort =
@@ -280,7 +348,9 @@ export type SetSort =
   /** Margin as a fraction of the parts bill. */
   | "return"
   /** Platinum per 48h, bounded by the slowest component. */
-  | "score";
+  | "score"
+  /** Return per expected day to sell the set. */
+  | "speed";
 
 export interface SetQuery {
   sortBy?: SetSort;
@@ -321,10 +391,15 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
   });
 
   const isTradable = (o: Opportunity) => o.rejects.length === 0 && o.margin > 0;
-  const isPriced = ({ input }: (typeof scored)[number]) =>
-    input.parts.every((p) => p.lowSell !== null);
+  // Priced means the whole parts bill is known: every part can be bought in
+  // full from someone reachable.
+  const costKnown = (p: SetInput["parts"][number]) =>
+    (p.fill ? p.fill.cost : p.lowSell) !== null;
+  const isPriced = ({ input }: (typeof scored)[number]) => input.parts.every(costKnown);
   const key = (o: Opportunity) =>
-    q.sortBy === "return" ? o.marginPct : q.sortBy === "score" ? o.score : o.margin;
+    q.sortBy === "return" || q.sortBy === "score" || q.sortBy === "speed"
+      ? sortKey(o, q.sortBy)
+      : o.margin;
 
   // Tradable first, then held back, then unpriced — an unknown edge sorted as
   // zero would otherwise land between real gains and real losses.
@@ -334,25 +409,16 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
     .sort((a, b) => tier(a) - tier(b) || key(b.o) - key(a.o));
 
   const stats = sellerStats(db);
-  const bestOrder = bestOrderStmt(db);
+  const factors = strategyCalibration(db);
 
   const rows = listed.slice(0, q.limit ?? 300).map<SetRow>(({ input, o }) => ({
     ...o,
+    ...calibrationOf(factors, "set", o.margin),
     setAsk: input.set.lowSell!,
     tradedAt: input.set.median7d ?? null,
     cappedByTrades: o.sellAt < input.set.lowSell! - policy.undercut,
-    unpriced: input.parts.filter((p) => p.lowSell === null).length,
-    parts: [...input.parts]
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map<SetPart>((p) => ({
-        itemId: p.itemId,
-        name: p.name,
-        qty: p.qty,
-        each: p.lowSell,
-        subtotal: p.lowSell === null ? null : p.lowSell * p.qty,
-        volume48h: p.volume48h,
-        ...componentOffer(bestOrder, stats, p),
-      })),
+    unpriced: input.parts.filter((p) => !costKnown(p)).length,
+    parts: setPartsOf(input, stats),
   }));
 
   return {
@@ -362,15 +428,102 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
   };
 }
 
+/**
+ * Alerts, newest first, with the traded-price trend of each item: a "bargain"
+ * against last week's median may just be where a falling market now sits.
+ */
 export function recentAlerts(db: Db, limit = 50) {
-  return db
+  const rows = db
     .prepare(
-      `SELECT a.*, i.name AS item_name, i.slug AS item_slug
-         FROM alert a JOIN item i ON i.id = a.item_id
+      `SELECT a.*, i.name AS item_name, i.slug AS item_slug,
+              ss.median_7d AS median7d, ss.median_30d AS median30d
+         FROM alert a
+         JOIN item i ON i.id = a.item_id
+         LEFT JOIN stat_summary ss ON ss.item_id = a.item_id AND ss.variant = a.variant
         ORDER BY a.fired_at DESC
         LIMIT ?`,
     )
-    .all(limit);
+    .all(limit) as Array<Record<string, unknown> & { median7d: number | null; median30d: number | null }>;
+  return rows.map((r) => ({ ...r, trend: trendOf(r.median7d, r.median30d) }));
+}
+
+export interface PriceHistory {
+  itemId: string;
+  name: string;
+  variant: string;
+  days: Array<{ day: string; volume: number; median: number | null; min: number | null; max: number | null }>;
+  median7d: number | null;
+  median30d: number | null;
+  volume7d: number | null;
+  trend: number | null;
+}
+
+/**
+ * Daily traded prices and volume. History is per variant at the source, and so
+ * here: a rank-0 mod's series says nothing about rank 10.
+ */
+export function priceHistory(db: Db, itemId: string, variant = "", days = 90): PriceHistory | null {
+  const item = db.prepare("SELECT id, name FROM item WHERE id = ?").get(itemId) as
+    | { id: string; name: string }
+    | undefined;
+  if (!item) return null;
+  const series = db
+    .prepare(
+      `SELECT day, volume, median, min_price AS min, max_price AS max
+         FROM stat_daily
+        WHERE item_id = @itemId AND variant = @variant AND day >= date('now', @window)
+        ORDER BY day`,
+    )
+    .all({ itemId, variant, window: `-${Math.max(1, Math.min(90, days))} days` }) as PriceHistory["days"];
+  const s = db
+    .prepare(
+      `SELECT median_7d AS median7d, median_30d AS median30d, volume_7d AS volume7d
+         FROM stat_summary WHERE item_id = ? AND variant = ?`,
+    )
+    .get(itemId, variant) as { median7d: number | null; median30d: number | null; volume7d: number } | undefined;
+  return {
+    itemId,
+    name: item.name,
+    variant,
+    days: series,
+    median7d: s?.median7d ?? null,
+    median30d: s?.median30d ?? null,
+    volume7d: s?.volume7d ?? null,
+    trend: trendOf(s?.median7d, s?.median30d),
+  };
+}
+
+export interface PlanQuery {
+  budget: number;
+  maxPerItem: number | null;
+  sortBy?: PlanSort;
+  minConfidence?: Confidence;
+}
+
+/**
+ * The budget plan: the ranked trades, calibrated against your record, fitted
+ * to the platinum you have — with what you already hold counted against each
+ * item's limit.
+ */
+export function tradePlan(db: Db, q: PlanQuery): Plan<Row> {
+  const candidates = opportunities(db, { limit: 1000 });
+  const held = new Map(
+    (
+      db
+        .prepare(
+          `SELECT item_id AS itemId, variant, SUM(buy_price * quantity) AS tied
+             FROM trade WHERE sold_at IS NULL GROUP BY item_id, variant`,
+        )
+        .all() as Array<{ itemId: string; variant: string; tied: number }>
+    ).map((h) => [keyOf(h), h.tied]),
+  );
+  return planTrades(candidates, {
+    budget: q.budget,
+    maxPerItem: q.maxPerItem,
+    sortBy: q.sortBy ?? "speed",
+    minConfidence: q.minConfidence ?? "medium",
+    held,
+  });
 }
 
 export function status(db: Db) {
@@ -457,12 +610,18 @@ export function setWatched(db: Db, itemId: string, variant: string, on: boolean)
   }
 }
 
-/** Items on the watchlist, for the frequent re-poll loop. */
+/**
+ * Items for the frequent re-poll loop: the watchlist, plus everything you
+ * hold. Exit alerts are only as good as the book they read, and a position's
+ * book was otherwise refreshed once per six-hour sweep.
+ */
 export function watchedItems(db: Db): Array<{ id: string; slug: string; name: string; tags: string }> {
   return db
     .prepare(
-      `SELECT DISTINCT i.id, i.slug, i.name, i.tags
-         FROM watchlist w JOIN item i ON i.id = w.item_id
+      `SELECT i.id, i.slug, i.name, i.tags
+         FROM item i
+        WHERE i.id IN (SELECT item_id FROM watchlist
+                       UNION SELECT item_id FROM trade WHERE sold_at IS NULL)
         ORDER BY i.slug`,
     )
     .all() as Array<{ id: string; slug: string; name: string; tags: string }>;

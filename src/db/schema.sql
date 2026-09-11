@@ -110,6 +110,12 @@ CREATE TABLE IF NOT EXISTS order_seen (
   -- still nobody bought it".
   top_rank        INTEGER,
   sweeps_at_best  INTEGER NOT NULL DEFAULT 0,
+  -- Units on the order, and its owner's status when last seen. Both arrive with
+  -- every order and used to be thrown away, so a set needing two of a part was
+  -- priced off a seller holding one, and an offline seller was offered as the
+  -- one to whisper. NULL on rows recorded before they were kept: unknown.
+  quantity    INTEGER,
+  user_status TEXT,
   -- First sweep in which this order was absent from the top-5.
   -- NOT a fill signal: /top returns only the best five, so five better orders
   -- appearing pushes an order out just as surely as a sale does. Treat it as
@@ -242,7 +248,23 @@ CREATE TABLE IF NOT EXISTS trade (
   expected_margin INTEGER,
   source         TEXT NOT NULL DEFAULT 'manual'
                    CHECK (source IN ('spread','set','alert','manual')),
-  note           TEXT
+  note           TEXT,
+  -- What you mean to sell at. Exit alerts fire against it; NULL falls back to
+  -- expected_sell. Kept apart from expected_sell, which is the prediction the
+  -- calibration table measures and must not move once recorded.
+  target_price   INTEGER
 );
 CREATE INDEX IF NOT EXISTS trade_open ON trade(sold_at) WHERE sold_at IS NULL;
 CREATE INDEX IF NOT EXISTS trade_item ON trade(item_id, variant);
+
+-- Exit signals already sent for an open position, so a check every five
+-- minutes does not repeat itself. `value` is the level it fired at — the bid,
+-- or the undercutting ask — so a strictly better bid or a deeper undercut
+-- fires again. A signal whose condition clears is deleted and may fire anew.
+CREATE TABLE IF NOT EXISTS exit_alert (
+  trade_id  INTEGER NOT NULL REFERENCES trade(id) ON DELETE CASCADE,
+  kind      TEXT NOT NULL CHECK (kind IN ('target_bid','undercut','stale')),
+  value     INTEGER,
+  fired_at  TEXT NOT NULL,
+  PRIMARY KEY (trade_id, kind)
+);

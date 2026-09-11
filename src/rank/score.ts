@@ -6,6 +6,8 @@
  */
 
 import { hoursSinceTrade, MAX_HISTORY_STALE_HOURS } from "./freshness";
+import type { FillResult } from "./depth";
+import { returnPerDay, sellTime, type Confidence } from "./timing";
 
 export interface RankingPolicy {
   /** Below this, an item cannot be ranked however fat its spread. */
@@ -97,11 +99,27 @@ export interface MarketRow {
   liveAt?: string | null;
   /** Median of completed trades for this variant — what actually gets paid. */
   median7d?: number | null;
+  /** The same over 30 days; against median7d, which way the price is moving. */
+  median30d?: number | null;
+}
+
+export interface SetPartInput {
+  itemId: string;
+  name: string;
+  qty: number;
+  lowSell: number | null;
+  volume48h: number | null;
+  /**
+   * The parts bought from the reachable book, quantity included. When present
+   * it IS the cost — the cheapest ask × qty assumes the cheapest seller holds
+   * every unit you need.
+   */
+  fill?: FillResult;
 }
 
 export interface SetInput {
   set: MarketRow;
-  parts: Array<{ itemId: string; name: string; qty: number; lowSell: number | null; volume48h: number | null }>;
+  parts: SetPartInput[];
 }
 
 export interface Opportunity {
@@ -128,6 +146,45 @@ export interface Opportunity {
    * seen minutes ago from one recorded at the start of a 22-minute crawl.
    */
   liveAt?: string | null;
+  /** Expected days to sell at `sellAt` — how long the platinum is tied up. */
+  sellDays: number | null;
+  sellConfidence: Confidence;
+  sellBasis: string;
+  median7d: number | null;
+  median30d: number | null;
+  /** (7-day median − 30-day median) / 30-day median; null without both. */
+  trend: number | null;
+}
+
+/** Which way the traded price is moving: last week against last month. */
+export function trendOf(m7: number | null | undefined, m30: number | null | undefined): number | null {
+  if (m7 == null || m30 == null || m30 <= 0) return null;
+  return Number(((m7 - m30) / m30).toFixed(3));
+}
+
+/**
+ * The market fields every opportunity carries, whichever strategy made it.
+ * `legs` is 2 for a spread: its bid waits to be filled before its ask can sell.
+ */
+function marketFacts(row: MarketRow, sellAt: number, legs = 1) {
+  const t = sellTime({
+    volume48h: row.volume48h,
+    volume7d: row.volume7d,
+    daysTraded30d: row.daysTraded30d,
+    // Both strategies list just under the cheapest ask, so nobody is ahead.
+    queue: 0,
+    sellAt,
+    tradedMedian: row.median7d ?? null,
+    legs,
+  });
+  return {
+    sellDays: t.days,
+    sellConfidence: t.confidence,
+    sellBasis: t.basis,
+    median7d: row.median7d ?? null,
+    median30d: row.median30d ?? null,
+    trend: trendOf(row.median7d, row.median30d),
+  };
 }
 
 /**
@@ -218,6 +275,7 @@ export function scoreSpread(
     bookAgeH: row.bookAgeH,
     sellCount: row.sellCount,
     score: scoreOf(margin, volume, policy),
+    ...marketFacts(row, sellAt, 2),
     rejects: [
       ...gate(row, policy, now),
       ...marginGate(margin, buyAt, policy),
@@ -245,14 +303,23 @@ export function setSellPrice(
   return traded !== null && traded > 0 ? Math.round(Math.min(traded, undercut)) : undercut;
 }
 
+/** What one part costs at the quantity needed; null when it cannot be bought in full. */
+function partCost(p: SetPartInput): number | null {
+  if (p.fill) return p.fill.cost;
+  return p.lowSell === null ? null : p.lowSell * p.qty;
+}
+
 /**
- * Set arbitrage: buy each component at its ask, assemble, sell the set.
+ * Set arbitrage: buy each component, assemble, sell the set.
  *
  * `qty` is load-bearing — dual-wield sets need two of most parts, and dropping
- * the multiplier turns a loss into an apparent profit.
+ * the multiplier turns a loss into an apparent profit. With the book to walk,
+ * so is order quantity: two blades from a seller holding one cost the cheapest
+ * blade plus the next one up.
  *
  * Liquidity is the bottleneck part's, not the set's: assembling is only as fast
- * as the rarest component. An unpriced part makes the edge unknown, not zero.
+ * as the rarest component. A part nobody sells makes the edge unknown, not
+ * zero — and so does one you cannot buy enough of right now.
  */
 export function scoreSet(
   input: SetInput,
@@ -263,29 +330,40 @@ export function scoreSet(
   const sellAt = setSellPrice(set, policy);
   if (sellAt === null || parts.length === 0) return null;
 
-  const unpriced = parts.filter((p) => p.lowSell === null);
-  if (unpriced.length > 0) {
+  const common = {
+    itemId: set.itemId,
+    slug: set.slug,
+    name: set.name,
+    variant: set.variant,
+    liveAt: set.liveAt ?? null,
+    kind: "set" as const,
+    sellAt,
+    bookAgeH: set.bookAgeH,
+    sellCount: set.sellCount,
+    ...marketFacts(set, sellAt),
+  };
+
+  const unpriced = parts.filter((p) => p.lowSell === null && (!p.fill || p.fill.available === 0));
+  const short = parts.filter((p) => !unpriced.includes(p) && partCost(p) === null);
+  if (unpriced.length > 0 || short.length > 0) {
     return {
-      itemId: set.itemId,
-      slug: set.slug,
-      name: set.name,
-      variant: set.variant,
-      liveAt: set.liveAt ?? null,
-      kind: "set",
+      ...common,
       buyAt: 0,
-      sellAt,
       margin: 0,
       marginPct: 0,
       volume48h: set.volume48h ?? 0,
-      bookAgeH: set.bookAgeH,
-      sellCount: set.sellCount,
       score: 0,
-      rejects: [`${unpriced.length} component(s) unpriced — edge unknown`],
-      detail: unpriced.map((p) => p.name).join(", "),
+      rejects: [
+        ...(unpriced.length ? [`${unpriced.length} component(s) unpriced — edge unknown`] : []),
+        ...short.map(
+          (p) => `short: only ${p.fill?.available ?? 0} of ${p.qty} ${p.name} from reachable sellers`,
+        ),
+      ],
+      detail: [...unpriced, ...short].map((p) => p.name).join(", "),
     };
   }
 
-  const cost = parts.reduce((sum, p) => sum + p.lowSell! * p.qty, 0);
+  const cost = parts.reduce((sum, p) => sum + partCost(p)!, 0);
   const margin = sellAt - cost;
 
   const bottleneck = Math.min(
@@ -294,19 +372,11 @@ export function scoreSet(
   );
 
   return {
-    itemId: set.itemId,
-    slug: set.slug,
-    name: set.name,
-    variant: set.variant,
-    liveAt: set.liveAt ?? null,
-    kind: "set",
+    ...common,
     buyAt: cost,
-    sellAt,
     margin,
     marginPct: cost > 0 ? margin / cost : 0,
     volume48h: bottleneck,
-    bookAgeH: set.bookAgeH,
-    sellCount: set.sellCount,
     score: scoreOf(margin, bottleneck, policy),
     rejects: [
       ...gate({ ...set, volume48h: bottleneck }, policy, now),
@@ -320,7 +390,16 @@ export type SortBy =
   /** Platinum per 48h — what you make if capital is not the constraint. */
   | "score"
   /** Margin as a fraction of outlay — what you make per platinum tied up. */
-  | "return";
+  | "return"
+  /** Return per expected day to sell — what you make per platinum per day. */
+  | "speed";
+
+/** The number each ranking orders by, for callers that re-rank (the plan, calibration). */
+export function sortKey(o: Pick<Opportunity, "margin" | "marginPct" | "score" | "buyAt" | "sellDays">, sortBy: SortBy): number {
+  if (sortBy === "return") return o.marginPct;
+  if (sortBy === "speed") return returnPerDay(o.margin, o.buyAt, o.sellDays);
+  return o.score;
+}
 
 /** Tradable opportunities, best first. */
 export function rank(
@@ -330,7 +409,5 @@ export function rank(
   const tradable = opportunities.filter(
     (o): o is Opportunity => o !== null && o.rejects.length === 0 && o.margin > 0,
   );
-  return sortBy === "return"
-    ? tradable.sort((a, b) => b.marginPct - a.marginPct)
-    : tradable.sort((a, b) => b.score - a.score);
+  return tradable.sort((a, b) => sortKey(b, sortBy) - sortKey(a, sortBy));
 }

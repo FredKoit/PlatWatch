@@ -7,13 +7,15 @@ import {
   logWhisper,
   opportunities,
   pendingWhispers,
+  priceHistory,
   recentAlerts,
   resolveWhisper,
   setArbitrage,
   setWatched,
   status,
+  tradePlan,
 } from "./api";
-import { closeTrade, deleteTrade, listTrades, openTrade, pnl } from "../trade/journal";
+import { closeTrade, deleteTrade, listTrades, openTrade, pnl, setTradeTarget } from "../trade/journal";
 import { DEFAULT_DUCAT_POLICY, ducatOpportunities, planSpend } from "../rank/ducats";
 
 /**
@@ -75,11 +77,45 @@ export function createApp(db: Db) {
           opportunities(db, {
             ...(kindParam === "spread" || kindParam === "set" ? { kind: kindParam } : {}),
             ...(capital && Number(capital) > 0 ? { maxBuyAt: Number(capital) } : {}),
-            ...(sort === "return" ? { sortBy: "return" as const } : {}),
+            ...(sort === "return" || sort === "speed" ? { sortBy: sort } : {}),
             limit: Number(url.searchParams.get("limit") ?? 100),
             watchedOnly: url.searchParams.get("watched") === "1",
           }),
         );
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/plan") {
+        const cap = url.searchParams.get("maxPerItem");
+        const sort = url.searchParams.get("sort");
+        const conf = url.searchParams.get("minConfidence");
+        json(
+          res,
+          tradePlan(db, {
+            budget: Math.max(0, Number(url.searchParams.get("budget") ?? 0) || 0),
+            maxPerItem: cap && Number(cap) > 0 ? Number(cap) : null,
+            ...(sort === "profit" || sort === "return" || sort === "speed" ? { sortBy: sort } : {}),
+            ...(conf === "low" || conf === "medium" || conf === "high" ? { minConfidence: conf } : {}),
+          }),
+        );
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/history") {
+        const itemId = url.searchParams.get("itemId");
+        const history = itemId
+          ? priceHistory(
+              db,
+              itemId,
+              url.searchParams.get("variant") ?? "",
+              Number(url.searchParams.get("days") ?? 90),
+            )
+          : null;
+        if (!history) {
+          json(res, { error: "unknown item" }, 404);
+          return;
+        }
+        json(res, history);
         return;
       }
 
@@ -89,7 +125,7 @@ export function createApp(db: Db) {
         json(
           res,
           setArbitrage(db, {
-            ...(sort === "return" || sort === "score" ? { sortBy: sort } : {}),
+            ...(sort === "return" || sort === "score" || sort === "speed" ? { sortBy: sort } : {}),
             ...(capital && Number(capital) > 0 ? { maxBuyAt: Number(capital) } : {}),
             includeHeldBack: url.searchParams.get("heldBack") === "1",
             limit: Number(url.searchParams.get("limit") ?? 300),
@@ -170,9 +206,27 @@ export function createApp(db: Db) {
           ...(b["expectedMargin"] !== undefined
             ? { expectedMargin: Number(b["expectedMargin"]) }
             : {}),
+          ...(Number(b["targetPrice"]) > 0 ? { targetPrice: Number(b["targetPrice"]) } : {}),
           ...(b["source"] ? { source: b["source"] as "spread" | "set" | "alert" | "manual" } : {}),
         });
         json(res, { id }, 201);
+        return;
+      }
+
+      // Before the generic PATCH below, which would read "5/target" as trade NaN.
+      const target = req.method === "PATCH" ? /^\/api\/trades\/(\d+)\/target$/.exec(path) : null;
+      if (target) {
+        const b = await readBody(req);
+        const price = Number(b["targetPrice"]);
+        if (!(price > 0)) {
+          json(res, { error: "targetPrice must be a positive number" }, 400);
+          return;
+        }
+        if (!setTradeTarget(db, Number(target[1]), Math.round(price))) {
+          json(res, { error: "no open position with that id" }, 404);
+          return;
+        }
+        json(res, { ok: true });
         return;
       }
 

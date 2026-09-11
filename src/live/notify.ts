@@ -11,9 +11,20 @@ import type { Alert } from "./detect";
  * the terminal bell; the Discord sink reaches a phone.
  */
 
+/**
+ * A message that is not a market alert — an exit signal on something you hold.
+ * The whisper, when there is one, travels with it.
+ */
+export interface Notice {
+  title: string;
+  body: string;
+  whisper?: string;
+}
+
 export interface Sink {
   name: string;
   send(alert: Alert): Promise<void>;
+  notify?(notice: Notice): Promise<void>;
 }
 
 const money = (n: number) => `${n}p`;
@@ -43,7 +54,21 @@ export const consoleSink: Sink = {
     const bell = process.stdout.isTTY ? "\x07" : "";
     process.stdout.write(`${bell}\n[${stamp}] ${formatAlert(alert)}\n    ${alert.whisper}\n`);
   },
+  async notify(n) {
+    const stamp = new Date().toLocaleTimeString();
+    const bell = process.stdout.isTTY ? "\x07" : "";
+    process.stdout.write(
+      `${bell}\n[${stamp}] EXIT ${n.title} — ${n.body}\n` + (n.whisper ? `    ${n.whisper}\n` : ""),
+    );
+  },
 };
+
+/** Toast lines for a batch of notices; the first leads, the rest are counted. */
+export function noticeToastContent(notices: Notice[]): { title: string; body: string } {
+  const first = notices[0]!;
+  if (notices.length === 1) return { title: first.title, body: first.body };
+  return { title: `${notices.length} updates on positions you hold`, body: `${first.title} — ${first.body}` };
+}
 
 /** The two lines of a toast for a batch of alerts. Pure, so it can be tested. */
 export function toastContent(alerts: Alert[]): { title: string; body: string } {
@@ -87,20 +112,27 @@ export function toastSink(opts: {
   const batchMs = opts.batchMs ?? 3_000;
   const show = opts.show ?? showToast;
   let pending: Alert[] = [];
+  let notices: Notice[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
 
+  // Alerts and notices batch separately: an exit signal on something you own
+  // must not be folded into "12 new alerts" and lose its headline.
   const flush = () => {
     timer = null;
-    if (pending.length === 0) return;
-    const batch = pending;
+    if (pending.length) show(toastContent(pending), opts.url);
+    if (notices.length) show(noticeToastContent(notices), opts.url);
     pending = [];
-    show(toastContent(batch), opts.url);
+    notices = [];
   };
 
   return {
     name: "toast",
     async send(alert) {
       pending.push(alert);
+      if (!timer) timer = setTimeout(flush, batchMs);
+    },
+    async notify(notice) {
+      notices.push(notice);
       if (!timer) timer = setTimeout(flush, batchMs);
     },
   };
@@ -154,6 +186,32 @@ export function discordSink(webhookUrl: string): Sink {
         throw new Error(`discord webhook returned ${res.status}`);
       }
     },
+    async notify(n) {
+      const res = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          content: `**${n.title}**\n${n.body}` + (n.whisper ? "\n```\n" + n.whisper + "\n```" : ""),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`discord webhook returned ${res.status}`);
+    },
+  };
+}
+
+/** The notice path of fanOut: every sink that takes notices, none blocking another. */
+export function fanOutNotices(sinks: Sink[]): (notice: Notice) => Promise<void> {
+  return async (notice) => {
+    const able = sinks.filter((s) => s.notify);
+    const results = await Promise.allSettled(able.map((s) => s.notify!(notice)));
+    results.forEach((r, i) => {
+      if (r.status === "rejected") {
+        console.error(
+          `  [${able[i]!.name} sink failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}]`,
+        );
+      }
+    });
   };
 }
 

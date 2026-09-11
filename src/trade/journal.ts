@@ -2,6 +2,8 @@ import type { Db } from "../db/index";
 import { latestSweepId } from "../rank/query";
 import { sellAdvice, type SellAdvice } from "../rank/sell";
 import { LIVE_OVERLAY, liveCutoff } from "../live/book";
+import { calibrationFactor, calibrationNote, type StrategyFactor } from "./calibration";
+import { evaluatePositions, type ExitSignal } from "./exits";
 
 /**
  * The trade journal.
@@ -20,6 +22,8 @@ export interface OpenTradeInput {
   boughtFrom?: string;
   expectedSell?: number;
   expectedMargin?: number;
+  /** What you mean to sell at; exit alerts fire against it. Defaults to expectedSell. */
+  targetPrice?: number;
   source?: "spread" | "set" | "alert" | "manual";
   note?: string;
 }
@@ -29,9 +33,9 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
     .prepare(
       `INSERT INTO trade
          (item_id, variant, quantity, buy_price, bought_at, bought_from,
-          expected_sell, expected_margin, source, note)
+          expected_sell, expected_margin, target_price, source, note)
        VALUES (@itemId, @variant, @quantity, @buyPrice, @boughtAt, @boughtFrom,
-               @expectedSell, @expectedMargin, @source, @note)`,
+               @expectedSell, @expectedMargin, @targetPrice, @source, @note)`,
     )
     .run({
       itemId: t.itemId,
@@ -42,10 +46,32 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
       boughtFrom: t.boughtFrom ?? null,
       expectedSell: t.expectedSell ?? null,
       expectedMargin: t.expectedMargin ?? null,
+      targetPrice: t.targetPrice ?? null,
       source: t.source ?? "manual",
       note: t.note ?? null,
     });
   return Number(info.lastInsertRowid);
+}
+
+/**
+ * Change what an open position is meant to sell at.
+ *
+ * The signals it had already sent were measured against the old target, so
+ * they are forgotten — a bid at the new target must be able to fire.
+ * expected_sell is deliberately untouched: it is the prediction calibration
+ * measures, and moving it after the fact would grade the tool on a revised
+ * answer.
+ */
+export function setTradeTarget(db: Db, id: number, targetPrice: number): boolean {
+  return db.transaction(() => {
+    const changed = db
+      .prepare("UPDATE trade SET target_price = ? WHERE id = ? AND sold_at IS NULL")
+      .run(targetPrice, id).changes;
+    if (changed) {
+      db.prepare("DELETE FROM exit_alert WHERE trade_id = ? AND kind IN ('target_bid','undercut')").run(id);
+    }
+    return changed > 0;
+  })();
 }
 
 export function closeTrade(
@@ -99,9 +125,13 @@ export interface TradeRow {
    * previously said nothing about.
    */
   advice: SellAdvice | null;
+  /** What it is meant to sell at: the target you set, else the model's expected sell. */
+  targetPrice: number | null;
+  /** Exit signals for an open position; empty once closed. */
+  exits: ExitSignal[];
 }
 
-export function listTrades(db: Db, limit = 100): TradeRow[] {
+export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
   const sweepId = latestSweepId(db);
   const rows = db
     .prepare(
@@ -110,6 +140,7 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
               t.bought_from AS boughtFrom,
               t.sell_price AS sellPrice, t.sold_at AS soldAt, t.sold_to AS soldTo,
               t.expected_sell AS expectedSell, t.expected_margin AS expectedMargin,
+              COALESCE(t.target_price, t.expected_sell) AS targetPrice,
               t.source, t.note,
               -- Live overlay: what a watchlist refresh or the feed saw since the
               -- sweep. Without it, starring an open position changed nothing here.
@@ -122,18 +153,34 @@ export function listTrades(db: Db, limit = 100): TradeRow[] {
         ORDER BY t.sold_at IS NOT NULL, t.bought_at DESC
         LIMIT @limit`,
     )
-    .all({ sweep: sweepId, limit, liveCutoff: liveCutoff() }) as Array<
-      Omit<TradeRow, "profit" | "heldH" | "advice">
+    .all({ sweep: sweepId, limit, liveCutoff: liveCutoff(now) }) as Array<
+      Omit<TradeRow, "profit" | "heldH" | "advice" | "exits">
     >;
 
-  const now = Date.now();
+  const heldH = (r: { soldAt: string | null; boughtAt: string }) =>
+    ((r.soldAt ? Date.parse(r.soldAt) : now) - Date.parse(r.boughtAt)) / 3_600_000;
+
+  const open = rows.filter((r) => r.soldAt === null);
+  const exits = evaluatePositions(
+    db,
+    open.map((r) => ({
+      tradeId: r.id,
+      itemId: r.itemId,
+      variant: r.variant,
+      name: r.name,
+      quantity: r.quantity,
+      target: r.targetPrice,
+      heldH: heldH(r),
+    })),
+    now,
+  );
+
   return rows.map((r) => ({
     ...r,
     profit: r.sellPrice === null ? null : (r.sellPrice - r.buyPrice) * r.quantity,
-    heldH: Number(
-      (((r.soldAt ? Date.parse(r.soldAt) : now) - Date.parse(r.boughtAt)) / 3_600_000).toFixed(1),
-    ),
+    heldH: Number(heldH(r).toFixed(1)),
     advice: r.soldAt === null ? sellAdvice(db, r.itemId, r.variant) : null,
+    exits: exits.get(r.id) ?? [],
   }));
 }
 
@@ -155,6 +202,65 @@ export interface Calibration {
   actual: number | null;
   /** actual / expected. Below 1 means the tool is optimistic. */
   ratio: number | null;
+  /** What this record does to the strategy's expected profit in the rankings. */
+  factor: number;
+  note: string;
+}
+
+interface ClosedTrade {
+  source: string;
+  quantity: number;
+  buyPrice: number;
+  sellPrice: number;
+  expectedSell: number | null;
+  expectedMargin: number | null;
+}
+
+/**
+ * The calibration table, from closed trades. Pure, so the rankings and the
+ * journal read the same numbers.
+ */
+export function calibrate(closed: ClosedTrade[]): Calibration[] {
+  const sources = [...new Set(closed.map((t) => t.source))];
+  return sources.map((source) => {
+    const group = closed.filter((t) => t.source === source);
+    // Per unit, so a five-unit trade does not outweigh a single one.
+    const expected = mean(
+      group.filter((t) => t.expectedMargin !== null).map((t) => t.expectedMargin!),
+    );
+    const actual = mean(group.map((t) => t.sellPrice - t.buyPrice));
+    const ratio =
+      expected !== null && actual !== null && expected !== 0 ? actual / expected : null;
+    // Only trades that carried a prediction can say anything about one.
+    const measured = group.filter((t) => t.expectedMargin !== null).length;
+    const factor = calibrationFactor(measured, ratio);
+    return {
+      source,
+      closed: group.length,
+      exactMatches: group.filter(
+        (t) => t.expectedSell !== null && t.sellPrice === t.expectedSell,
+      ).length,
+      expected,
+      actual,
+      ratio,
+      factor,
+      note: calibrationNote(source, measured, ratio, factor),
+    };
+  });
+}
+
+/** Each strategy's factor for the rankings — read straight from closed trades. */
+export function strategyCalibration(db: Db): Map<string, StrategyFactor> {
+  const closed = db
+    .prepare(
+      `SELECT source, quantity, buy_price AS buyPrice, sell_price AS sellPrice,
+              expected_sell AS expectedSell, expected_margin AS expectedMargin
+         FROM trade WHERE sold_at IS NOT NULL AND sell_price IS NOT NULL`,
+    )
+    .all() as ClosedTrade[];
+  return new Map(
+    calibrate(closed).map((c) => [c.source, { factor: c.factor, closed: c.closed, note: c.note }]),
+  );
 }
 
 export interface Pnl {
@@ -204,25 +310,16 @@ export function pnl(db: Db): Pnl {
     ? marks.reduce((sum, t) => sum + (t.marketNow! - t.buyPrice) * t.quantity, 0)
     : null;
 
-  const sources = [...new Set(closed.map((t) => t.source))];
-  const bySource: Calibration[] = sources.map((source) => {
-    const group = closed.filter((t) => t.source === source);
-    // Per unit, so a five-unit trade does not outweigh a single one.
-    const expected = mean(
-      group.filter((t) => t.expectedMargin !== null).map((t) => t.expectedMargin!),
-    );
-    const actual = mean(group.map((t) => t.profit! / t.quantity));
-    return {
-      source,
-      closed: group.length,
-      exactMatches: group.filter(
-        (t) => t.expectedSell !== null && t.sellPrice === t.expectedSell,
-      ).length,
-      expected,
-      actual,
-      ratio: expected !== null && actual !== null && expected !== 0 ? actual / expected : null,
-    };
-  });
+  const bySource = calibrate(
+    closed.map((t) => ({
+      source: t.source,
+      quantity: t.quantity,
+      buyPrice: t.buyPrice,
+      sellPrice: t.sellPrice!,
+      expectedSell: t.expectedSell,
+      expectedMargin: t.expectedMargin,
+    })),
+  );
 
   return {
     realised,

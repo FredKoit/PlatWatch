@@ -197,6 +197,22 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 8,
+    name: "order depth, seller status, trade targets",
+    up(db) {
+      // Every order arrives with its quantity and its owner's status, and both
+      // were discarded. Without quantity a set needing two of a part was costed
+      // off a seller holding one; without status an offline seller was offered
+      // as the one to whisper. Existing rows stay NULL — unknown — and fill in
+      // as the next sweep re-observes them.
+      addColumn(db, "order_seen", "quantity", "INTEGER");
+      addColumn(db, "order_seen", "user_status", "TEXT");
+      // The price an open position is meant to sell at; exit alerts fire
+      // against it. NULL falls back to expected_sell, so nothing is backfilled.
+      addColumn(db, "trade", "target_price", "INTEGER");
+    },
+  },
 ];
 
 export interface MigrationResult {

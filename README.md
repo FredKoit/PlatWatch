@@ -37,6 +37,14 @@ variables set only in a shell:
 
 Then restart the daemon so it picks the variable up.
 
+**Exit alerts** cover what you already hold, through the same toast and
+webhook. Record a purchase with "bought" and give it a target; every five
+minutes the daemon checks each open position and says when a buyer bids at or
+above your target (with the whisper to sell to them), when units are listed
+below it, or when the position has sat far longer than expected. Each signal
+fires once; a better bid or a deeper undercut fires again. Held items are
+refreshed with the watchlist, so the check reads a book minutes old, not hours.
+
 ## Running it unattended
 
 `npm start` stops when its terminal closes. To keep PlatWatch running and have
@@ -78,7 +86,7 @@ those by hand, stop the daemon first. Anything that only reads the database
 | `npm run sell -- rhino_prime_set` | What to list something at, and how long it will take |
 | `npm run watch` | Live sniper alone |
 | `npm run ingest -- sweep` | A crawl by hand: `catalog`, `details`, `sweep`, `stats` |
-| `npm test` | 182 tests |
+| `npm test` | 233 tests |
 
 Sweeps are resumable. Interrupt one and `npm run ingest -- sweep --resume`
 continues it rather than starting over.
@@ -92,8 +100,9 @@ limiter across every job, and priority keeps the live poll ahead of a
 
 Jobs: catalogue daily, part lists for new sets hourly (no requests unless a new
 Prime Access landed), full sweep every 6h, price history daily, retention daily,
-watchlist every 5 min. Jobs with nothing to do log nothing. Last-run times
-persist, so restarting does not re-trigger a long crawl.
+watchlist — plus everything you hold — every 5 min, and the exit check every 5
+min (database only, no requests). Jobs with nothing to do log nothing. Last-run
+times persist, so restarting does not re-trigger a long crawl.
 
 ## How it decides
 
@@ -104,13 +113,15 @@ best ask, wait for both. Margin is the spread minus what it costs to be top of
 book on each side. This is not a whisper — offering a seller their asking price
 and then undercutting it loses money.
 
-**Set arbitrage** buys components at their asks, assembles, and undercuts the
-set — but never lists above where sets actually trade. Against the ask alone,
-Aeolak topped the list at +183p: 64p of parts, cheapest set ask 248p, for a set
-that trades at 77p. Component quantities matter too: dual-wield sets need two of
-most parts, and treating that as one inverts the answer. The **Sets** tab lays
-this out per set — every part × quantity, their sum, what the set sells for —
-and can show the sets held back, with the reason.
+**Set arbitrage** buys components, assembles, and undercuts the set — but never
+lists above where sets actually trade. Against the ask alone, Aeolak topped the
+list at +183p: 64p of parts, cheapest set ask 248p, for a set that trades at
+77p. The parts are costed by **walking the book**: two blades from a seller
+holding one cost the cheapest blade plus the next one up, and a part you cannot
+buy enough of from reachable sellers holds the set back as "short" rather than
+pricing it. The **Sets** tab lays this out per set — every part, who you would
+buy it from, their sum, what the set sells for — and can show the sets held
+back, with the reason.
 
 **Ducats** spends platinum for a different currency, so it is ranked separately.
 Parts convert at a fixed rate whatever you paid, so only the purchase price
@@ -119,6 +130,28 @@ moves the return.
 Everything is filtered on liquidity, book freshness, corroboration on both
 sides, and — the rule that took longest to learn — **prices are judged against
 completed trades, never against what sellers ask.**
+
+**Selling time** comes with every row: your place in the queue over the units
+sold per day, counting both legs of a spread (your bid filling, then your ask
+selling). It ships with a confidence — high needs trades on most days of the
+month and enough of them — because a quick estimate on a market that traded on
+three days is a guess. Platinum you wait on is platinum you cannot use.
+
+**The plan** turns a budget into a shortlist: the ranked trades in order, one
+per item, none taking more than the per-item limit — counting what you already
+hold in it. Ranked by default on return per day, which puts a 15p edge that
+sells today ahead of 400p that sits for a week.
+
+**Your results re-rank the strategies.** Each strategy's expected profit is
+scaled by what its closed trades actually realised, weighted as if ten trades
+had already landed on the prediction — ten closed trades move it halfway, a
+handful barely at all. With no record it changes nothing. The Trades tab shows
+the factor per strategy.
+
+**Price history** opens from any item name: daily traded median with its
+low–high range, and volume, with the trade's own prices drawn across it — the
+way to tell an unusual bargain from a market sliding downhill. Rows carry a
+trend tag when last week's price moved 5% or more against the month's.
 
 ## Things the API will do to you
 
@@ -142,6 +175,14 @@ Everything is keyed per variant.
 use `mod_rank` and `subtype` where orders use `rank` and `subtype`. Orders also
 report `subtype: "regular"` where history reports nothing, so the neutral
 subtype is normalised away or the two never join.
+
+**Orders carry a quantity, and sellers an online status — both were being
+thrown away.** A set needing two of a part was priced off a seller who might
+hold one, and the cheapest "seller" offered was often an offline player or a
+feed sighting hours old: for 172 of 766 set parts, the seller shown asked less
+than the price the set was costed at. Both are recorded now, and a seller only
+counts if a top-of-book read listed them, or the feed saw them within its
+15-minute window, and they were not last seen offline.
 
 **`quantityInSet` is not always 1.** Akimbo and dual-wield sets need two of most
 components. Dual Kamas Prime costs ~100p in parts against an 88p set — a flat
