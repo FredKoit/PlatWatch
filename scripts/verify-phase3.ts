@@ -29,7 +29,8 @@ function check(label: string, ok: boolean, detail: string): void {
 }
 
 const spreads = spreadRows(db, sweepId).map((r) => scoreSpread(r));
-const sets = setRows(db, sweepId).map((s) => scoreSet(s));
+const setInputs = setRows(db, sweepId);
+const sets = setInputs.map((s) => scoreSet(s));
 const all = [...spreads, ...sets].filter((o): o is Opportunity => o !== null);
 const ranked = rank(all);
 const bySlug = new Map(all.map((o) => [`${o.kind}:${o.slug}`, o]));
@@ -74,17 +75,36 @@ for (const slug of ["corpus_void_key", "arcane_squall_helmet", "arcane_pendragon
 }
 
 console.log("\n── set arbitrage uses component quantities ──────────────────────────────");
-const dk = bySlug.get("set:dual_kamas_prime_set");
-if (!dk) {
-  check("dual_kamas_prime_set evaluated", false, "missing");
-} else {
-  check(
-    "dual kamas priced with quantities",
-    dk.buyAt > 80,
-    `parts cost ${dk.buyAt}p (a flat sum would be ~48p) · edge ${dk.margin}p`,
-  );
-  check("dual kamas not ranked as profitable", !rankedSlugs.has("set:dual_kamas_prime_set"), `edge ${dk.margin}p`);
+// This used to assert Dual Kamas cost more than 80p and was unprofitable. Both
+// were facts about one day's market, not about the code: when blade and handle
+// prices fell the cost landed on exactly 80p and the gate failed with nothing
+// broken. The invariant is that EVERY set is costed at Σ(part × quantity), so
+// check that directly, across all of them.
+let costed = 0;
+let wrongCost = 0;
+let multiQtySets = 0;
+let flatWouldDiffer = 0;
+for (const input of setInputs) {
+  const scored = scoreSet(input);
+  if (!scored || input.parts.some((p) => p.lowSell === null)) continue; // edge unknown
+  costed++;
+  const weighted = input.parts.reduce((n, p) => n + p.lowSell! * p.qty, 0);
+  const flat = input.parts.reduce((n, p) => n + p.lowSell!, 0);
+  if (scored.buyAt !== weighted) wrongCost++;
+  if (input.parts.some((p) => p.qty > 1)) {
+    multiQtySets++;
+    if (weighted !== flat) flatWouldDiffer++;
+  }
 }
+check("every set costed at part price × quantity", wrongCost === 0, `${wrongCost} of ${costed} wrong`);
+check(
+  "quantities actually change the answer",
+  multiQtySets > 0 && flatWouldDiffer > 0,
+  `${multiQtySets} sets need 2+ of a part; a flat sum would misprice ${flatWouldDiffer}`,
+);
+
+const dk = bySlug.get("set:dual_kamas_prime_set");
+if (dk) console.log(`        e.g. Dual Kamas: parts ${dk.buyAt}p, edge ${dk.margin}p today`);
 
 console.log("\n── top of the list ──────────────────────────────────────────────────────");
 for (const o of ranked.slice(0, 10)) {
