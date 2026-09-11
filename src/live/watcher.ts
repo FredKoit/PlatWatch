@@ -6,6 +6,7 @@ import type { WfmOrder } from "../wfm/types";
 import { variantKey } from "../wfm/types";
 import { DEFAULT_ALERT_POLICY, detect, type Alert, type AlertPolicy, type Baseline } from "./detect";
 import { applyLiveOrders, LIVE_OVERLAY, liveCutoff } from "./book";
+import { latestSweepId } from "../rank/query";
 
 /**
  * The live layer.
@@ -77,10 +78,28 @@ export interface WatchStats {
   liveUpdates: number;
   alerts: number;
   errors: number;
+  /** The sweep alerts are currently judged against. */
+  baselineSweepId: number | null;
 }
 
 export interface WatchOptions {
-  sweepId: number;
+  /**
+   * Which sweep to judge orders against. Resolved on EVERY reload, never once.
+   *
+   * The sniper used to take a fixed sweep id at startup and keep it for its
+   * whole life, so it ignored every sweep that completed afterwards. Worse,
+   * detect() suppresses alerts once the baseline is older than
+   * maxBaselineAgeH — so about a day and a half after that first sweep, every
+   * alert stopped, with no error and nothing in the log to say why.
+   *
+   * Defaults to the latest sweep: the same baseline the ranking uses, so the
+   * two cannot disagree about what the market looks like.
+   */
+  baselineSweep?: () => number | null;
+  /** Injectable for tests; defaults to the live /v2/orders/recent feed. */
+  fetchRecent?: (signal?: AbortSignal) => Promise<WfmOrder[]>;
+  /** Called when newer sweep data replaces the baseline. */
+  onBaselineChange?: (sweepId: number) => void;
   pollMs?: number;
   policy?: AlertPolicy;
   signal?: AbortSignal;
@@ -112,7 +131,12 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
   const policy = opts.policy ?? DEFAULT_ALERT_POLICY;
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
-  let baselines = loadBaselines(db, opts.sweepId);
+  const resolveSweep = opts.baselineSweep ?? (() => latestSweepId(db));
+  const fetchRecent = opts.fetchRecent ?? getRecentOrders;
+
+  let sweepId = resolveSweep();
+  let baselines: Map<string, Baseline> =
+    sweepId === null ? new Map() : loadBaselines(db, sweepId);
 
   const stats: WatchStats = {
     polls: 0,
@@ -121,6 +145,7 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
     liveUpdates: 0,
     alerts: 0,
     errors: 0,
+    baselineSweepId: sweepId,
   };
   // The API window holds a few hundred orders; keep a generous multiple so an
   // order cannot fall out of memory and be re-reported as new.
@@ -130,7 +155,7 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
   while (!opts.signal?.aborted) {
     let orders: WfmOrder[] = [];
     try {
-      orders = await getRecentOrders(opts.signal);
+      orders = await fetchRecent(opts.signal);
       stats.polls++;
     } catch (err) {
       stats.errors++;
@@ -159,7 +184,18 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
       // judged against the median — but a cheap ask posted seconds earlier in
       // the same batch legitimately makes a following bid profitable.
       stats.liveUpdates += applyLiveOrders(db, fresh);
-      baselines = loadBaselines(db, opts.sweepId);
+
+      // Re-resolve rather than reuse: a sweep may have finished since the last
+      // poll, and judging against the old one is how alerts used to go silent.
+      const next = resolveSweep();
+      if (next !== null) {
+        if (next !== sweepId) {
+          sweepId = next;
+          stats.baselineSweepId = next;
+          opts.onBaselineChange?.(next);
+        }
+        baselines = loadBaselines(db, sweepId);
+      }
     }
     stats.newOrders += fresh.length;
 

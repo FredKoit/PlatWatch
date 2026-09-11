@@ -138,11 +138,14 @@ async function runWatcher(): Promise<void> {
   }
   if (controller.signal.aborted) return;
 
-  const sweepId = latestSweepId(db)!;
-  log("watch", `live sniper on sweep #${sweepId} · sinks: ${sinks.map((s) => s.name).join(", ")}`);
+  log(
+    "watch",
+    `live sniper on sweep #${latestSweepId(db)} · sinks: ${sinks.map((s) => s.name).join(", ")}`,
+  );
 
   const stats = await watch(db, {
-    sweepId,
+    // No fixed sweep id: the baseline follows each new sweep as it completes.
+    onBaselineChange: (id) => log("watch", `baseline moved to sweep #${id}`),
     pollMs: Number(flag("poll") ?? 90) * 1000,
     policy: DEFAULT_ALERT_POLICY,
     signal: controller.signal,

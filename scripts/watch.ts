@@ -57,16 +57,16 @@ console.log(
     `(${baselineAge.toFixed(1)}h old) · sinks: ${sinks.map((s) => s.name).join(", ")}`,
 );
 console.log(
-  `alerting on sells ≤${policy.sellDiscount * 100}% of median or buys ≥${
-    policy.buyPremium * 100
-  }% of ask, profit ≥${policy.minProfit}p, volume ≥${policy.minVolume48h}/48h\n`,
+  `alerting on sells ≤${Math.round(policy.sellDiscount * 100)}% of median or ` +
+    `buys ≥${Math.round(policy.buyPremium * 100)}% of ask, ` +
+    `profit ≥${policy.minProfit}p, volume ≥${policy.minVolume48h}/48h\n`,
 );
 if (baselineAge > 24) {
   console.log(`  ! baseline is ${baselineAge.toFixed(0)}h old — re-run the sweep for current prices\n`);
 }
 
 const stats = await watch(db, {
-  sweepId,
+  onBaselineChange: (id) => console.log(`  baseline moved to sweep #${id}`),
   pollMs,
   policy,
   signal: controller.signal,
