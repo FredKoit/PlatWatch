@@ -6,6 +6,7 @@ import {
   rank,
   scoreSet,
   scoreSpread,
+  setSellPrice,
   type MarketRow,
 } from "./score";
 
@@ -92,7 +93,7 @@ test("set cost multiplies each component by the quantity needed", () => {
   // Dual Kamas: blade x2, handle x2, blueprint x1 against an 88p set.
   const o = scoreSet(
     {
-      set: row({ name: "Dual Kamas Prime Set", lowSell: 88, volume48h: 21 }),
+      set: row({ name: "Dual Kamas Prime Set", lowSell: 88, median7d: 88, volume48h: 21 }),
       parts: [
         { itemId: "blade", name: "Dual Kamas Prime Blade", qty: 2, lowSell: 35, volume48h: 30 },
         { itemId: "handle", name: "Dual Kamas Prime Handle", qty: 2, lowSell: 7, volume48h: 30 },
@@ -139,6 +140,34 @@ test("an unpriced component makes the edge unknown, not zero", () => {
   assert.equal(o.score, 0);
   assert.ok(o.rejects[0]!.includes("unpriced"));
   assert.deepEqual(rank([o]), []);
+});
+
+test("a set is sold where sets trade, not where the cheapest seller asks", () => {
+  // Aeolak, from a real sweep: 64p of parts, cheapest set ask 248p, trades at
+  // 77p. Against the ask it was the best set in the game at +183p.
+  const o = scoreSet(
+    {
+      set: row({ name: "Aeolak Set", lowSell: 248, median7d: 77, volume48h: 8 }),
+      parts: [
+        { itemId: "stock", name: "Aeolak Stock", qty: 1, lowSell: 12, volume48h: 30 },
+        { itemId: "barrel", name: "Aeolak Barrel", qty: 2, lowSell: 26, volume48h: 30 },
+      ],
+    },
+    DEFAULT_POLICY,
+    NOW,
+  )!;
+  assert.equal(o.buyAt, 64);
+  assert.equal(o.sellAt, 77, "listed at the traded price, not under a 248p ask");
+  assert.equal(o.margin, 13, "not 183");
+  assert.deepEqual(o.rejects, [], "a real 13p edge is still an edge");
+});
+
+test("a set still undercuts the book when the book is below where it trades", () => {
+  assert.equal(setSellPrice(row({ lowSell: 60, median7d: 70 })), 59);
+});
+
+test("with no set trade history the set sells just under its cheapest ask", () => {
+  assert.equal(setSellPrice(row({ lowSell: 60, median7d: null })), 59);
 });
 
 test("ranking prefers realisable platinum over raw margin", () => {

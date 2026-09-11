@@ -78,7 +78,7 @@ those by hand, stop the daemon first. Anything that only reads the database
 | `npm run sell -- rhino_prime_set` | What to list something at, and how long it will take |
 | `npm run watch` | Live sniper alone |
 | `npm run ingest -- sweep` | A crawl by hand: `catalog`, `details`, `sweep`, `stats` |
-| `npm test` | 174 tests |
+| `npm test` | 182 tests |
 
 Sweeps are resumable. Interrupt one and `npm run ingest -- sweep --resume`
 continues it rather than starting over.
@@ -105,8 +105,12 @@ book on each side. This is not a whisper — offering a seller their asking pric
 and then undercutting it loses money.
 
 **Set arbitrage** buys components at their asks, assembles, and undercuts the
-set. Component quantities matter: dual-wield sets need two of most parts, and
-treating that as one inverts the answer.
+set — but never lists above where sets actually trade. Against the ask alone,
+Aeolak topped the list at +183p: 64p of parts, cheapest set ask 248p, for a set
+that trades at 77p. Component quantities matter too: dual-wield sets need two of
+most parts, and treating that as one inverts the answer. The **Sets** tab lays
+this out per set — every part × quantity, their sum, what the set sells for —
+and can show the sets held back, with the reason.
 
 **Ducats** spends platinum for a different currency, so it is ranked separately.
 Parts convert at a fixed rate whatever you paid, so only the purchase price

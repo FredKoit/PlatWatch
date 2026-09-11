@@ -106,6 +106,22 @@ check(
 const dk = bySlug.get("set:dual_kamas_prime_set");
 if (dk) console.log(`        e.g. Dual Kamas: parts ${dk.buyAt}p, edge ${dk.margin}p today`);
 
+console.log("\n── sets are sold where sets trade ───────────────────────────────────────");
+// Pricing the set at its ask put Aeolak on top at +183p: 64p of parts against a
+// 248p ask, for a set that trades at 77p. Whatever the day's asks, no set may be
+// planned to sell above its traded median.
+let aboveTraded = 0;
+let capped = 0;
+for (const input of setInputs) {
+  const scored = scoreSet(input);
+  const traded = input.set.median7d ?? null;
+  if (!scored || traded === null || traded <= 0) continue;
+  if (scored.sellAt > Math.round(traded)) aboveTraded++;
+  if (scored.sellAt < input.set.lowSell! - DEFAULT_POLICY.undercut) capped++;
+}
+check("no set sold above its traded median", aboveTraded === 0, `${aboveTraded} violations`);
+console.log(`        ${capped} sets list at the traded price because their asks sit above it`);
+
 console.log("\n── top of the list ──────────────────────────────────────────────────────");
 for (const o of ranked.slice(0, 10)) {
   console.log(

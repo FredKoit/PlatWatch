@@ -227,7 +227,26 @@ export function scoreSpread(
 }
 
 /**
- * Set arbitrage: buy each component at its ask, assemble, undercut the set.
+ * Where an assembled set gets listed: undercut the cheapest ask to be seen, but
+ * never above where sets actually trade.
+ *
+ * The same rule as sellAdvice's fair price, so the edge promised here is the
+ * price the Trades tab tells you to list at once you hold the set. Pricing the
+ * set at its ask alone put Aeolak at the top of the list: parts 64p, cheapest
+ * set ask 248p, so +183p — for a set that trades at 77p.
+ */
+export function setSellPrice(
+  set: Pick<MarketRow, "lowSell" | "median7d">,
+  policy: RankingPolicy = DEFAULT_POLICY,
+): number | null {
+  if (set.lowSell === null) return null;
+  const undercut = set.lowSell - policy.undercut;
+  const traded = set.median7d ?? null;
+  return traded !== null && traded > 0 ? Math.round(Math.min(traded, undercut)) : undercut;
+}
+
+/**
+ * Set arbitrage: buy each component at its ask, assemble, sell the set.
  *
  * `qty` is load-bearing — dual-wield sets need two of most parts, and dropping
  * the multiplier turns a loss into an apparent profit.
@@ -241,7 +260,8 @@ export function scoreSet(
   now = Date.now(),
 ): Opportunity | null {
   const { set, parts } = input;
-  if (set.lowSell === null || parts.length === 0) return null;
+  const sellAt = setSellPrice(set, policy);
+  if (sellAt === null || parts.length === 0) return null;
 
   const unpriced = parts.filter((p) => p.lowSell === null);
   if (unpriced.length > 0) {
@@ -253,7 +273,7 @@ export function scoreSet(
       liveAt: set.liveAt ?? null,
       kind: "set",
       buyAt: 0,
-      sellAt: set.lowSell,
+      sellAt,
       margin: 0,
       marginPct: 0,
       volume48h: set.volume48h ?? 0,
@@ -266,7 +286,6 @@ export function scoreSet(
   }
 
   const cost = parts.reduce((sum, p) => sum + p.lowSell! * p.qty, 0);
-  const sellAt = set.lowSell - policy.undercut;
   const margin = sellAt - cost;
 
   const bottleneck = Math.min(

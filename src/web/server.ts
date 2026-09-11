@@ -9,6 +9,7 @@ import {
   pendingWhispers,
   recentAlerts,
   resolveWhisper,
+  setArbitrage,
   setWatched,
   status,
 } from "./api";
@@ -77,6 +78,21 @@ export function createApp(db: Db) {
             ...(sort === "return" ? { sortBy: "return" as const } : {}),
             limit: Number(url.searchParams.get("limit") ?? 100),
             watchedOnly: url.searchParams.get("watched") === "1",
+          }),
+        );
+        return;
+      }
+
+      if (req.method === "GET" && path === "/api/sets") {
+        const capital = url.searchParams.get("maxBuyAt");
+        const sort = url.searchParams.get("sort");
+        json(
+          res,
+          setArbitrage(db, {
+            ...(sort === "return" || sort === "score" ? { sortBy: sort } : {}),
+            ...(capital && Number(capital) > 0 ? { maxBuyAt: Number(capital) } : {}),
+            includeHeldBack: url.searchParams.get("heldBack") === "1",
+            limit: Number(url.searchParams.get("limit") ?? 300),
           }),
         );
         return;

@@ -83,6 +83,25 @@
   dialog .part .pn{font-size:13px}
   dialog .part .pq{color:var(--gold); font-weight:600}
 
+  /* Sets tab: one row per set, expanding into its shopping list. */
+  #sets tr.set-row{cursor:pointer}
+  #sets tr.held > td{opacity:.6}
+  button.tog{background:none; border:0; cursor:pointer; color:var(--ink-3); font-size:12px; padding:0 2px}
+  tr[aria-expanded="true"] button.tog{color:var(--gold)}
+  .sub{font-size:11px; color:var(--ink-3); font-weight:400}
+  .capped{color:var(--warn)}
+  .why{font-size:11px; color:var(--bad)}
+  .loss{color:var(--bad); font-weight:600}
+  tr.breakdown > td{background:var(--panel); padding:2px 10px 12px}
+  #sets tbody tr.breakdown:hover{background:none}
+  table.bd{width:auto; font-size:12px}
+  table.bd td{border-bottom:1px solid var(--line); padding:5px 10px}
+  table.bd .pq{color:var(--gold); font-weight:600}
+  table.bd tr.tot td{border-bottom:0; color:var(--ink-2)}
+  table.bd tr.tot td.margin{color:var(--good)}
+  table.bd tr.tot td.loss{color:var(--bad)}
+  table.bd tr.tot.first td{border-top:1px solid var(--ink-3)}
+
   button.act{
     background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line);
     border-radius:4px; padding:3px 8px; font:inherit; font-size:12px; cursor:pointer;
@@ -131,6 +150,7 @@
 
 <nav>
   <button data-tab="ops" aria-selected="true">Opportunities</button>
+  <button data-tab="sets" aria-selected="false">Sets</button>
   <button data-tab="alerts" aria-selected="false">Live alerts</button>
   <button data-tab="log" aria-selected="false">Whisper log</button>
   <button data-tab="trades" aria-selected="false">Trades &amp; P&amp;L</button>
@@ -170,6 +190,38 @@
     <th></th><th>Item</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">Margin</th>
     <th class="r">Vol 48h</th><th class="r">Book</th><th class="r">Score</th><th class="r">Ret</th>
     <th>Counterparty</th><th>How to play it</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<section id="tab-sets" hidden>
+  <div class="bar">
+    <input type="search" id="set-filter" placeholder="filter by name…">
+    <label class="field"><span>Rank by</span>
+      <select id="set-sort">
+        <option value="margin">profit per set</option>
+        <option value="return">return on capital</option>
+        <option value="score">platinum / 48h</option>
+      </select>
+    </label>
+    <label class="field"><span>Max capital</span>
+      <input type="number" id="set-capital" min="0" step="10" placeholder="any">
+      <span class="unit">p of parts</span>
+    </label>
+    <label class="chk"><input type="checkbox" id="set-held"> show held back</label>
+    <button class="act" id="set-refresh">refresh</button>
+    <span class="stat" id="set-count"></span>
+  </div>
+  <p class="hint">
+    Every set costed as its parts — each component at its cheapest ask, times the quantity the set
+    needs — against what the assembled set sells for. That is the cheapest set ask less 1p, but
+    <span class="capped">never above where sets actually trade</span>: when sellers ask far more than
+    buyers pay, the set is priced at the traded median and the profit shrinks to match.
+    Click a row for its shopping list; copying a whisper logs it. Volume is the slowest part's —
+    you can only assemble as fast as the rarest component sells.
+  </p>
+  <div class="wrap"><table id="sets"><thead><tr>
+    <th></th><th>Set</th><th class="r">Parts</th><th class="r">Set sells at</th><th class="r">Profit</th>
+    <th class="r">Ret</th><th class="r">Vol 48h</th><th class="r">Book</th><th></th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -249,7 +301,11 @@
 const $ = (s) => document.querySelector(s);
 const api = async (path, opts) => {
   const res = await fetch(path, opts);
-  if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+  if (!res.ok) {
+    const err = new Error((await res.json()).error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -339,12 +395,15 @@ function renderOps() {
     return;
   }
 
-  body.innerHTML = shown.map((r, i) => {
+  body.innerHTML = shown.map((r) => {
     const ageCls = (r.bookAgeH ?? 0) > 24 ? "age-old" : "age-fresh";
     // Both strategies start by buying, so the whisper always targets the
     // cheapest live ask.
     const target = r.seller;
-    return `<tr data-i="${i}">
+    // Indexed into `rows`, not `shown`: the click handler looks rows up there,
+    // and with a filter active the two disagree — every button acted on the
+    // wrong item.
+    return `<tr data-i="${rows.indexOf(r)}">
       <td><button class="star ${r.watched ? "on" : ""}" data-act="watch">${r.watched ? "★" : "☆"}</button></td>
       <td><span class="name">${esc(r.name)}</span>${r.variant ? `<span class="variant">${esc(r.variant)}</span>` : ""}
           <div class="kind">${r.kind}${r.detail ? " · " + esc(r.detail) : ""}</div></td>
@@ -403,38 +462,7 @@ $("#ops").addEventListener("click", async (e) => {
   }
 
   if (btn.dataset.act === "bought") {
-    const form = await askForm(`Bought ${row.name}`, [
-      {
-        name: "paid",
-        label: "Paid per unit (platinum)",
-        type: "number",
-        value: row.buyAt,
-        required: true,
-        hint:
-          `model assumed ${row.buyAt}p` +
-          (row.seller ? `, cheapest live ask is ${row.seller.platinum}p` : ""),
-      },
-      { name: "qty", label: "Quantity", type: "number", value: 1, required: true },
-    ]);
-    if (!form) return;
-    const paid = form.paid;
-    const qty = form.qty;
-    await api("/api/trades", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        itemId: row.itemId,
-        variant: row.variant,
-        quantity: Number(qty),
-        buyPrice: Number(paid),
-        boughtFrom: row.seller ? row.seller.ingameName : null,
-        expectedSell: row.sellAt,
-        expectedMargin: row.margin,
-        source: row.kind,
-      }),
-    });
-    btn.textContent = "logged";
-    btn.classList.add("done");
+    await recordBought(row, btn);
     return;
   }
 
@@ -465,6 +493,59 @@ $("#ops").addEventListener("click", async (e) => {
   }
 });
 
+/** Open a journal position from a ranked row — spread or set, either tab. */
+async function recordBought(row, btn) {
+  const form = await askForm(`Bought ${row.name}`, [
+    {
+      name: "paid",
+      label: "Paid per unit (platinum)",
+      type: "number",
+      value: row.buyAt,
+      required: true,
+      hint:
+        `model assumed ${row.buyAt}p` +
+        (row.seller ? `, cheapest live ask is ${row.seller.platinum}p` : ""),
+    },
+    { name: "qty", label: "Quantity", type: "number", value: 1, required: true },
+  ]);
+  if (!form) return;
+  await api("/api/trades", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      itemId: row.itemId,
+      variant: row.variant,
+      quantity: Number(form.qty),
+      buyPrice: Number(form.paid),
+      boughtFrom: row.seller ? row.seller.ingameName : null,
+      expectedSell: row.sellAt,
+      expectedMargin: row.margin,
+      source: row.kind,
+    }),
+  });
+  btn.textContent = "logged";
+  btn.classList.add("done");
+}
+
+/** Copy a set component's whisper and log it against that part's seller. */
+async function copyPartWhisper(btn, part, setName) {
+  await copyWhisper(part.whisper);
+  btn.textContent = "copied";
+  btn.classList.add("done");
+  await api("/api/whispers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      itemId: part.itemId,
+      userId: part.seller.userId,
+      ingameName: part.seller.ingameName,
+      platinum: part.seller.platinum,
+      note: `set part for ${setName}`,
+    }),
+  });
+  loadStatus();
+}
+
 /** One dialog listing every component to acquire, each with its own whisper. */
 async function showParts(row) {
   const modal = $("#modal");
@@ -484,22 +565,7 @@ async function showParts(row) {
   const onClick = async (e) => {
     const b = e.target.closest("button[data-part]");
     if (!b) return;
-    const p = row.parts[Number(b.dataset.part)];
-    await copyWhisper(p.whisper);
-    b.textContent = "copied";
-    b.classList.add("done");
-    await api("/api/whispers", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        itemId: p.itemId,
-        userId: p.seller.userId,
-        ingameName: p.seller.ingameName,
-        platinum: p.seller.platinum,
-        note: `set part for ${row.name}`,
-      }),
-    });
-    loadStatus();
+    await copyPartWhisper(b, row.parts[Number(b.dataset.part)], row.name);
   };
   modal.addEventListener("click", onClick);
   modal.addEventListener(
@@ -513,6 +579,143 @@ async function showParts(row) {
   );
   modal.showModal();
 }
+
+let setList = [];
+let setTotals = { tradable: 0, priced: 0 };
+const openSets = new Set();
+
+const signed = (n) => (n > 0 ? `+${n}` : String(n));
+
+/** Why the set is listed at the price it is — the ask, or the trades capping it. */
+function setPriceNote(r) {
+  if (r.cappedByTrades) return `cheapest ask ${r.setAsk}p, but sets trade at ${Math.round(r.tradedAt)}p`;
+  if (r.tradedAt === null) return `undercuts the ${r.setAsk}p ask · no trade history to check it against`;
+  return `undercuts the ${r.setAsk}p ask · trades at ${Math.round(r.tradedAt)}p`;
+}
+
+function setRowHtml(r, i) {
+  const open = openSets.has(r.itemId);
+  const known = r.unpriced === 0;
+  const held = r.rejects.length > 0 || r.margin <= 0;
+  return `<tr data-i="${i}" class="set-row${held ? " held" : ""}" aria-expanded="${open}">
+    <td><button class="tog" aria-label="${open ? "hide" : "show"} parts">${open ? "▾" : "▸"}</button></td>
+    <td><span class="name">${esc(r.name)}</span>
+        <div class="kind">${r.parts.length} parts</div>
+        ${r.rejects.length ? `<div class="why">${esc(r.rejects.join("; "))}</div>` : ""}</td>
+    <td class="r num">${known ? r.buyAt : "?"}</td>
+    <td class="r num">${r.sellAt}
+        <div class="sub${r.cappedByTrades ? " capped" : ""}">ask ${r.setAsk}${
+          r.tradedAt === null ? "" : ` · trades ${Math.round(r.tradedAt)}`}</div></td>
+    <td class="r num ${!known ? "" : r.margin > 0 ? "margin" : "loss"}">${known ? signed(r.margin) : "?"}</td>
+    <td class="r num">${known ? Math.round(r.marginPct * 100) + "%" : "–"}</td>
+    <td class="r num">${r.volume48h}</td>
+    <td class="r num ${(r.bookAgeH ?? 0) > 24 ? "age-old" : "age-fresh"}">${
+      r.liveAt ? '<span class="live">live</span>' : r.bookAgeH === null ? "–" : r.bookAgeH.toFixed(0) + "h"}</td>
+    <td>${held ? "" : '<button class="act" data-act="bought" title="record that you bought the parts">bought</button>'}</td>
+  </tr>`;
+}
+
+/** The comparison itself: each part × quantity, their sum, and the set. */
+function setBreakdownHtml(r, i) {
+  const known = r.unpriced === 0;
+  const lines = r.parts.map((p, j) => `<tr>
+      <td class="r pq">${p.qty}×</td>
+      <td>${esc(p.name)}</td>
+      <td class="r num">${p.each === null ? "–" : p.each + "p"}</td>
+      <td class="r num">${p.subtotal === null ? '<span class="why">unpriced</span>' : p.subtotal + "p"}</td>
+      <td class="r num sub">${p.volume48h ?? 0}/48h</td>
+      <td>${p.seller
+        ? rateCell(p.seller) + (p.seller.platinum !== p.each ? ` <span class="sub">asks ${p.seller.platinum}p</span>` : "")
+        : '<span class="rate none">no live seller</span>'}</td>
+      <td>${p.whisper ? `<button class="act" data-part="${j}">copy whisper</button>` : ""}</td>
+    </tr>`).join("");
+  return `<tr class="breakdown" data-i="${i}"><td></td><td colspan="8">
+    <table class="bd"><tbody>${lines}
+      <tr class="tot first"><td></td><td>Parts, bought separately</td><td></td>
+        <td class="r num">${known ? r.buyAt + "p" : "?"}</td><td colspan="3"></td></tr>
+      <tr class="tot"><td></td><td>Set, sold assembled</td><td></td>
+        <td class="r num">${r.sellAt}p</td>
+        <td colspan="3" class="sub${r.cappedByTrades ? " capped" : ""}">${esc(setPriceNote(r))}</td></tr>
+      <tr class="tot"><td></td><td><b>Profit</b></td><td></td>
+        <td class="r num ${!known ? "" : r.margin > 0 ? "margin" : "loss"}">${known ? signed(r.margin) + "p" : "?"}</td>
+        <td colspan="3"></td></tr>
+    </tbody></table></td></tr>`;
+}
+
+function renderSets() {
+  const q = $("#set-filter").value.trim().toLowerCase();
+  const body = $("#sets tbody");
+  // Keep each row's index into setList, which is what the click handler reads.
+  const shown = setList
+    .map((r, i) => [r, i])
+    .filter(([r]) => !q || r.name.toLowerCase().includes(q));
+
+  $("#set-count").innerHTML = `<b>${setTotals.tradable}</b> tradable of <b>${setTotals.priced}</b> fully priced sets`;
+
+  if (!shown.length) {
+    const why = setTotals.priced === 0
+      ? "No priced sets yet — the first sweep has to finish."
+      : setList.length
+        ? "Nothing matches the filter."
+        : "No set clears the policy right now. Tick “show held back” to see why.";
+    body.innerHTML = `<tr><td colspan="9" class="empty">${why}</td></tr>`;
+    return;
+  }
+  body.innerHTML = shown
+    .map(([r, i]) => setRowHtml(r, i) + (openSets.has(r.itemId) ? setBreakdownHtml(r, i) : ""))
+    .join("");
+}
+
+async function loadSets() {
+  const params = new URLSearchParams();
+  if ($("#set-sort").value !== "margin") params.set("sort", $("#set-sort").value);
+  if ($("#set-capital").value) params.set("maxBuyAt", $("#set-capital").value);
+  if ($("#set-held").checked) params.set("heldBack", "1");
+  let res;
+  try {
+    res = await api("/api/sets?" + params);
+  } catch (err) {
+    // Said out loud: a blank table reads as "no sets", not "request failed".
+    // A 404 here almost always means the page is newer than the daemon — the
+    // page is re-read per request, the API only when the daemon starts.
+    $("#set-count").textContent = "";
+    $("#sets tbody").innerHTML = `<tr><td colspan="9" class="empty">Could not load sets: ${esc(err.message)}.${
+      err.status === 404
+        ? " The running daemon predates this tab — restart it: scripts\\platwatch-stop.ps1, then Start-ScheduledTask -TaskName PlatWatch."
+        : ""}</td></tr>`;
+    return;
+  }
+  setList = res.rows;
+  setTotals = { tradable: res.tradable, priced: res.priced };
+  renderSets();
+}
+
+$("#sets").addEventListener("click", async (e) => {
+  const tr = e.target.closest("tr[data-i]");
+  if (!tr) return;
+  const row = setList[Number(tr.dataset.i)];
+  const btn = e.target.closest("button");
+
+  if (btn?.dataset.act === "bought") {
+    await recordBought(row, btn);
+    return;
+  }
+  if (btn?.dataset.part !== undefined) {
+    await copyPartWhisper(btn, row.parts[Number(btn.dataset.part)], row.name);
+    return;
+  }
+  if (tr.classList.contains("set-row")) {
+    if (openSets.has(row.itemId)) openSets.delete(row.itemId);
+    else openSets.add(row.itemId);
+    renderSets();
+  }
+});
+
+$("#set-filter").addEventListener("input", renderSets);
+$("#set-sort").addEventListener("change", loadSets);
+$("#set-capital").addEventListener("change", loadSets);
+$("#set-held").addEventListener("change", loadSets);
+$("#set-refresh").addEventListener("click", loadSets);
 
 async function loadAlerts() {
   const list = await api("/api/alerts");
@@ -758,9 +961,10 @@ document.querySelector("nav").addEventListener("click", (e) => {
   for (const b of document.querySelectorAll("nav button")) {
     b.setAttribute("aria-selected", String(b === btn));
   }
-  for (const id of ["ops", "alerts", "log", "trades", "ducats"]) {
+  for (const id of ["ops", "sets", "alerts", "log", "trades", "ducats"]) {
     document.getElementById("tab-" + id).hidden = id !== btn.dataset.tab;
   }
+  if (btn.dataset.tab === "sets") loadSets();
   if (btn.dataset.tab === "alerts") loadAlerts();
   if (btn.dataset.tab === "log") loadLog();
   if (btn.dataset.tab === "trades") loadTrades();
