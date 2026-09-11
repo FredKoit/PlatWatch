@@ -10,6 +10,7 @@ import { getTopOrders } from "../src/wfm/client";
 import { statistics, volume48h } from "../src/wfm/statistics";
 import { limiter } from "../src/wfm/http";
 import { WfmError } from "../src/wfm/errors";
+import { requireLock } from "../src/daemon/lock";
 
 const SAMPLE_SIZE = 100;
 
@@ -105,13 +106,18 @@ async function main(): Promise<number> {
 }
 
 // Set exitCode rather than calling process.exit(), which truncates buffered
-// stdout when it is a pipe. Limiter timers are unref'd, so the process ends.
-main().then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (err) => {
-    console.error("verification crashed:", err);
-    process.exitCode = 1;
-  },
-);
+// stdout when it is a pipe. The process ends once the lock's server closes.
+// (An earlier note here said limiter timers were unref'd; that was removed
+// long ago, because it let the process exit in the middle of a crawl.)
+const lock = await requireLock("verify-phase1");
+await main()
+  .then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err) => {
+      console.error("verification crashed:", err);
+      process.exitCode = 1;
+    },
+  )
+  .finally(() => lock.release());

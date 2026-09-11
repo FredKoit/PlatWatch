@@ -16,6 +16,7 @@ import { ingestSetDetails } from "../src/ingest/details";
 import { itemsToSweep, sweepTopOrders } from "../src/ingest/sweep";
 import { ingestStats, statsCandidates } from "../src/ingest/stats";
 import { loadCatalog } from "../src/wfm/catalog";
+import { requireLock } from "../src/daemon/lock";
 
 const args = process.argv.slice(2);
 const command = args[0] ?? "";
@@ -169,8 +170,12 @@ if (!run) {
   console.error(`usage: ingest.ts <${Object.keys(commands).join("|")}> [--limit N] [--resume]`);
   process.exitCode = 1;
 } else {
-  run().catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
-    process.exitCode = 1;
-  });
+  // Refuse to run beside the daemon: two rate limiters is double the load.
+  const lock = await requireLock(`ingest ${command}`);
+  await run()
+    .catch((err) => {
+      console.error(err instanceof Error ? err.message : err);
+      process.exitCode = 1;
+    })
+    .finally(() => lock.release());
 }

@@ -13,6 +13,10 @@ import { latestSweepId } from "../src/rank/query";
 import { DEFAULT_ALERT_POLICY } from "../src/live/detect";
 import { consoleSink, discordSink, fanOut, type Sink } from "../src/live/notify";
 import { watch } from "../src/live/watcher";
+import { requireLock } from "../src/daemon/lock";
+
+// Refuse to run beside the daemon, which already runs this same sniper.
+const lock = await requireLock("watch");
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | null => {
@@ -89,3 +93,5 @@ console.log(
     `${stats.alerts} alerts · ${stats.errors} errors`,
 );
 db.close();
+// The lock is a listening server, which keeps the process alive until closed.
+await lock.release();

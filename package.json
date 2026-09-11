@@ -11,7 +11,6 @@
     "verify:phase1": "tsx scripts/verify-phase1.ts",
     "ingest": "tsx scripts/ingest.ts",
     "verify:phase2": "tsx scripts/verify-phase2.ts",
-    "serve": "tsx scripts/serve.ts",
     "watch": "tsx scripts/watch.ts",
     "rank": "tsx scripts/rank.ts",
     "verify:phase3": "tsx scripts/verify-phase3.ts",
