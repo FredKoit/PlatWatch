@@ -22,5 +22,5 @@ if (-not (Test-Path $node)) {
     exit 1
 }
 
-& $node --import tsx scripts/daemon.ts --log .cache/platwatch.log
+& $node --import tsx scripts/daemon.ts --log .cache/platwatch.log --no-toast
 exit $LASTEXITCODE
