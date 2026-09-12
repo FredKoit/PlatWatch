@@ -51,6 +51,7 @@ export interface PartFill {
 /** One line of a set's shopping list. */
 export interface SetPart {
   itemId: string;
+  item_slug: string;
   name: string;
   qty: number;
   /** Cheapest reachable ask per unit. */
@@ -87,6 +88,8 @@ export type PartOffer = SetPart;
 export type PlayKind = "post" | "buy-parts";
 
 export interface Row extends Opportunity {
+  /** warframe.market address, for the link that confirms availability. */
+  item_slug: string;
   /** Whom you would actually message, and the message itself. */
   seller: Counterparty | null;
   buyer: Counterparty | null;
@@ -266,6 +269,7 @@ function setPartsOf(
       }));
       return {
         itemId: p.itemId,
+        item_slug: p.slug ?? "",
         name: p.name,
         qty: p.qty,
         each: fills[0]?.platinum ?? p.lowSell,
@@ -361,6 +365,7 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
     const base = {
       ghostSweeps: sellOrder?.sweeps_at_best ?? 0,
       ...o,
+      item_slug: o.slug,
       ...calibrationOf(factors, o.kind, o.margin),
       seller,
       buyer,
@@ -386,6 +391,7 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
 
 /** A set costed as its parts, against what the assembled set sells for. */
 export interface SetRow extends Opportunity {
+  item_slug: string;
   /** Cheapest ask for the assembled set — the one you undercut. */
   setAsk: number;
   /** 7-day median of completed set trades, which caps `sellAt`. */
@@ -478,6 +484,7 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
 
   const rows = listed.slice(0, q.limit ?? 300).map<SetRow>(({ input, o }) => ({
     ...o,
+    item_slug: o.slug,
     ...calibrationOf(factors, "set", o.margin),
     setAsk: input.set.lowSell!,
     tradedAt: input.set.median7d ?? null,
@@ -496,25 +503,71 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
 /**
  * Alerts, newest first, with the traded-price trend of each item: a "bargain"
  * against last week's median may just be where a falling market now sits.
+ *
+ * Each alert also says whether it is still backed by fresh sourcing evidence.
+ * An alert is a sighting from minutes or hours ago; it is only presented as
+ * actionable when the order that fired it is still reachable and, for a sell
+ * alert, a reachable ask still lets you source the item at the reference.
  */
-export function recentAlerts(db: Db, limit = 50) {
+export function recentAlerts(db: Db, limit = 200, now = Date.now()) {
   const rows = db
     .prepare(
       `SELECT a.*, i.name AS item_name, i.slug AS item_slug, os.user_id,
               ss.median_7d AS median7d, ss.median_30d AS median30d,
               af.outcome, af.trade_id, af.note AS feedback_note, af.recorded_at,
-              CASE WHEN t.sold_at IS NOT NULL THEN (t.sell_price - t.buy_price) * t.quantity END AS realised_profit
+              -- Every lot sold from the alert's purchase, plus the sale it filled.
+              (SELECT SUM((t.sell_price - t.buy_price) * t.quantity) FROM trade t
+                WHERE t.sold_at IS NOT NULL AND (t.alert_id = a.id OR t.id = af.trade_id)) AS realised_profit,
+              EXISTS (SELECT 1 FROM trade t WHERE t.id = af.trade_id) AS trade_linked,
+              EXISTS (SELECT 1 FROM order_seen o
+                       WHERE o.order_id = a.order_id
+                         AND o.type = CASE a.kind WHEN 'underpriced_sell' THEN 'sell' ELSE 'buy' END
+                         AND ${REACHABLE_ORDER}) AS order_reachable,
+              (SELECT MIN(o.platinum) FROM order_seen o
+                WHERE o.item_id = a.item_id AND o.variant = a.variant AND o.type = 'sell'
+                  AND o.order_id != a.order_id AND ${REACHABLE_ORDER}) AS source_ask
          FROM alert a
          JOIN item i ON i.id = a.item_id
          LEFT JOIN order_seen os ON os.order_id = a.order_id
          LEFT JOIN stat_summary ss ON ss.item_id = a.item_id AND ss.variant = a.variant
          LEFT JOIN alert_feedback af ON af.alert_id = a.id
-         LEFT JOIN trade t ON t.id = af.trade_id
         ORDER BY a.fired_at DESC
-        LIMIT ?`,
+        LIMIT @limit`,
     )
-    .all(limit) as Array<Record<string, unknown> & { median7d: number | null; median30d: number | null }>;
-  return rows.map((r) => ({ ...r, trend: trendOf(r.median7d, r.median30d) }));
+    .all({ limit, liveCutoff: liveCutoff(now), actionableCutoff: actionableSweepCutoff(now) }) as Array<
+      Record<string, unknown> & {
+        kind: string; reference: number; suspicious: number; median7d: number | null; median30d: number | null;
+        order_reachable: number; source_ask: number | null; trade_linked: number;
+      }
+    >;
+  return rows.map((r) => {
+    const reachable = r.order_reachable === 1;
+    let fresh: boolean;
+    let sourcingDetail: string;
+    if (r.kind === "underpriced_sell") {
+      fresh = reachable;
+      sourcingDetail = reachable
+        ? "the listing was seen recently from a reachable seller"
+        : "the listing has not been seen recently — it may already be sold";
+    } else {
+      fresh = reachable && r.source_ask !== null && r.source_ask <= r.reference;
+      sourcingDetail = !reachable
+        ? "the buy order has not been seen recently"
+        : r.source_ask === null
+          ? "no reachable seller to source the item from right now"
+          : r.source_ask > r.reference
+            ? `the cheapest reachable ask is now ${r.source_ask}p, above the ${r.reference}p it was sourced at`
+            : `a reachable ask at ${r.source_ask}p still covers it`;
+    }
+    return {
+      ...r,
+      trend: trendOf(r.median7d, r.median30d),
+      sourcing: fresh ? "fresh" : "stale",
+      sourcingDetail,
+      actionable: fresh && !r.suspicious,
+      trade_linked: r.trade_linked === 1,
+    };
+  });
 }
 
 export interface PriceHistory {
@@ -580,7 +633,7 @@ export interface PlanQuery {
 export interface SellerRoute {
   userId: string;
   ingameName: string;
-  purchases: Array<{ itemId: string; name: string; units: number; platinum: number; whisper: string }>;
+  purchases: Array<{ itemId: string; item_slug: string; name: string; units: number; platinum: number; whisper: string }>;
   totalPlatinum: number;
 }
 
@@ -601,9 +654,19 @@ export function alertPerformance(db: Db) {
     SUM(CASE WHEN af.outcome='bought' THEN 1 ELSE 0 END) bought,
     SUM(CASE WHEN af.outcome='already_gone' THEN 1 ELSE 0 END) alreadyGone,
     SUM(CASE WHEN af.outcome='no_reply' THEN 1 ELSE 0 END) noReply,
-    SUM(CASE WHEN af.outcome='margin_disappeared' THEN 1 ELSE 0 END) marginDisappeared,
-    SUM(CASE WHEN t.sold_at IS NOT NULL THEN (t.sell_price-t.buy_price)*t.quantity ELSE 0 END) realisedProfit
-    FROM alert a LEFT JOIN alert_feedback af ON af.alert_id=a.id LEFT JOIN trade t ON t.id=af.trade_id`).get() as Record<string, number>;
+    SUM(CASE WHEN af.outcome='margin_disappeared' THEN 1 ELSE 0 END) marginDisappeared
+    FROM alert a LEFT JOIN alert_feedback af ON af.alert_id=a.id`).get() as Record<string, number>;
+  // Every closed lot that came from an alert — each partial sale of an alert
+  // purchase, and each sale an alert filled — counted once, however many
+  // alerts it is linked to. Joining feedback to one trade used to miss every
+  // lot but the last.
+  const realised = db.prepare(`SELECT COALESCE(SUM((sell_price - buy_price) * quantity), 0) profit, COUNT(*) lots
+      FROM trade
+     WHERE sold_at IS NOT NULL
+       AND (alert_id IS NOT NULL OR id IN (SELECT trade_id FROM alert_feedback WHERE trade_id IS NOT NULL))`)
+    .get() as { profit: number; lots: number };
+  r["realisedProfit"] = realised.profit;
+  r["realisedLots"] = realised.lots;
   const reviewed = Number(r.reviewed ?? 0), bought = Number(r.bought ?? 0);
   const recommendations: string[] = [];
   if (reviewed >= 5) {
@@ -613,7 +676,8 @@ export function alertPerformance(db: Db) {
     if (bought >= 3 && Number(r.realisedProfit ?? 0) <= 0) recommendations.push("Completed alert trades are not profitable: raise the minimum-profit threshold.");
   }
   return { ...r, total: Number(r.total ?? 0), reviewed, bought,
-    conversionRate: reviewed ? bought / reviewed : null, realisedProfit: Number(r.realisedProfit ?? 0), recommendations };
+    conversionRate: reviewed ? bought / reviewed : null, realisedProfit: Number(r.realisedProfit ?? 0),
+    realisedLots: Number(r.realisedLots ?? 0), recommendations };
 }
 
 export type TradePlan = Plan<Row> & { sellerRoutes: SellerRoute[]; routePurchases: number };
@@ -630,7 +694,7 @@ export function sellerRoutesOf(picks: Row[]): SellerRoute[] {
           totalPlatinum: 0,
         };
         route.purchases.push({
-          itemId: part.itemId, name: part.name, units: fill.units,
+          itemId: part.itemId, item_slug: part.item_slug, name: part.name, units: fill.units,
           platinum: fill.platinum, whisper: fill.whisper,
         });
         route.totalPlatinum += fill.units * fill.platinum;
@@ -714,14 +778,24 @@ export function status(db: Db) {
       bytes: Number(getMeta(db, "backup:lastBytes") ?? 0) || null,
     },
     livePoll: { lastSuccess: getMeta(db, "watch:lastSuccess"), lastError: getMeta(db, "watch:lastError") },
-    notifications: ["toast", "discord"].map((name) => ({
-      name,
-      configured: name === "toast" || getMeta(db, "notify:discord:configured") === "1",
-      lastAttempt: getMeta(db, `notify:${name}:lastAttempt`),
-      lastSuccess: getMeta(db, `notify:${name}:lastSuccess`),
-      lastError: getMeta(db, `notify:${name}:lastError`),
-      pending: name === "discord" ? count("SELECT COUNT(*) c FROM notification_outbox") : 0,
-    })),
+    // Enabled is what the running daemon decided at startup (the toast sink is
+    // off under --no-toast), not merely whether a sink exists. Toasts used to
+    // report "configured" unconditionally, so Settings showed them working
+    // while the daemon had them switched off.
+    notifications: ["toast", "discord"].map((name) => {
+      const flag = getMeta(db, name === "toast" ? "notify:toast:enabled" : "notify:discord:configured");
+      return {
+        name,
+        enabled: flag === "1",
+        configured: flag === "1",
+        state: flag === null ? "unknown" : flag === "1" ? "enabled" : "disabled",
+        detail: getMeta(db, `notify:${name}:detail`) ?? "",
+        lastAttempt: getMeta(db, `notify:${name}:lastAttempt`),
+        lastSuccess: getMeta(db, `notify:${name}:lastSuccess`),
+        lastError: getMeta(db, `notify:${name}:lastError`),
+        pending: name === "discord" ? count("SELECT COUNT(*) c FROM notification_outbox") : 0,
+      };
+    }),
     whispers: count("SELECT COUNT(*) c FROM whisper_log"),
     watched: count("SELECT COUNT(*) c FROM watchlist"),
   };
@@ -768,7 +842,7 @@ export function resolveWhisper(
 export function pendingWhispers(db: Db, limit = 30) {
   return db
     .prepare(
-      `SELECT w.*, i.name AS item_name
+      `SELECT w.*, i.name AS item_name, i.slug AS item_slug
          FROM whisper_log w JOIN item i ON i.id = w.item_id
         ORDER BY w.sent_at DESC
         LIMIT ?`,

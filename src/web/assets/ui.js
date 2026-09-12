@@ -24,7 +24,8 @@ const viewDescriptions = {
   ducats: 'Make every platinum count. Compare Prime parts by their ducat return.'
   ,settings: 'Control notifications, planning defaults, and the live alert thresholds.'
 };
-import { $, api, esc, describeError, toast, act, placeholderRow } from "./core.js";
+import { $, api, esc, describeError, toast, act, placeholderRow, connection } from "./core.js";
+const JSON_HEADERS = { "content-type": "application/json" };
 
 async function copyAndLog(btn, text, entry) {
   await copyWhisper(text);
@@ -184,14 +185,22 @@ let rows = [];
  * prompt() blocks the page, cannot be styled or labelled, and browsers are
  * steadily restricting it. Resolves to an object of values, or null on cancel.
  */
-function askForm(title, fields) {
+function askForm(title, fields, opts = {}) {
   const modal = $("#modal");
   $("#modal-title").textContent = title;
-  $("#modal-fields").innerHTML = fields.map((f) => `
+  $("#modal-ok").textContent = opts.okLabel || "Save";
+  // A whole-platinum field pre-filled with a decimal prediction (138.75p)
+  // fails the input's step="1" check and silently refuses to submit.
+  const initial = (f) => f.type === "number" && typeof f.value === "number" && !Number.isInteger(f.value)
+    ? Math.round(f.value) : f.value ?? "";
+  $("#modal-fields").innerHTML = (opts.intro ? `<div class="modal-intro">${opts.intro}</div>` : "") + fields.map((f) => `
     <label>${esc(f.label)}
-      <input name="${esc(f.name)}" type="${f.type || "text"}"
-             value="${esc(f.value ?? "")}" ${f.type === "number" ? 'step="1" min="0"' : ""}
-             ${f.required ? "data-required=\"1\"" : ""}>
+      ${f.type === "select"
+        ? `<select name="${esc(f.name)}">${f.options.map((o) => `<option value="${esc(o.value)}"${
+            String(o.value) === String(f.value ?? "") ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select>`
+        : `<input name="${esc(f.name)}" type="${f.type || "text"}"
+             value="${esc(initial(f))}" ${f.type === "number" ? `step="1" min="${f.min ?? 0}"` : ""}
+             ${f.required ? "data-required=\"1\"" : ""}>`}
       ${f.hint ? `<span class="hint-inline">${esc(f.hint)}</span>` : ""}
     </label>`).join("") + `<span class="warn-inline" id="modal-warn"></span>`;
 
@@ -253,10 +262,15 @@ function playCell(r) {
 /** Days as a trader reads them: hours under a day, then days, then "weeks". */
 function fmtDays(d) {
   if (d == null) return "–";
-  if (d < 1) return `~${Math.max(1, Math.round(d * 24))}h`;
+  const minutes = d * 1440;
+  if (minutes < 60) return `~${Math.max(1, Math.round(minutes))}m`;
+  if (minutes < 48 * 60) return `~${Math.round(minutes / 60)}h`;
   if (d < 14) return `~${d < 3 ? d.toFixed(1) : Math.round(d)}d`;
   return "2w+";
 }
+
+/** Platinum that may be a decimal prediction: 138.75 stays 138.75, 45 stays 45. */
+const fmtNum = (n) => n == null ? "–" : Number.isInteger(Number(n)) ? String(n) : Number(n).toFixed(2).replace(/0$/, "");
 
 const CONFIDENCE = {
   high: { dots: "●●●", label: "high", cls: "" },
@@ -307,8 +321,24 @@ function riskCell(r) {
   return `<span class="risk-meter ${tone}" title="${esc(tip)}"><b>${score}</b>/100</span><span class="sub">${signed(r.riskAdjustedMargin ?? 0)}p adjusted</span>`;
 }
 
+const MARKET_TIP = "Open on warframe.market to confirm availability";
+
+/**
+ * An item name that opens its warframe.market page in a new tab — the place
+ * to confirm a listing or market still exists before committing platinum.
+ * A specific order's page is preferred when one is known; warframe.market's
+ * API does not currently supply one, so this is normally the item page.
+ */
+function marketLink(slug, name, orderUrl = null) {
+  const href = orderUrl || (slug ? `https://warframe.market/items/${encodeURIComponent(slug)}` : null);
+  if (!href) return `<span class="name">${esc(name)}</span>`;
+  return `<a class="name link market" href="${esc(href)}" target="_blank" rel="noopener noreferrer"
+    title="${MARKET_TIP}" aria-label="${esc(name)} — ${MARKET_TIP}">${esc(name)}<span class="ext" aria-hidden="true">↗</span></a>`;
+}
+
+/** The name links to warframe.market; price history stays one click away beside it. */
 function itemName(r, name = r.name) {
-  return `<button class="name link" data-act="chart" title="price history">${esc(name)}</button>`;
+  return `${marketLink(r.item_slug ?? r.slug, name)}<button class="hist-btn" data-act="chart" title="Price history" aria-label="Price history for ${esc(name)}">history</button>`;
 }
 
 function renderOps() {
@@ -484,7 +514,7 @@ function renderSellerRoutes() {
   box.querySelector("summary").textContent = `Seller route · ${purchases} part purchases grouped into ${planRoutes.length} player visits`;
   box.querySelector(".route-grid").innerHTML = planRoutes.map((route, i) => `<article class="route">
     <div class="route-head"><b>${esc(route.ingameName)}</b><span>${route.totalPlatinum}p total</span></div>
-    <ul>${route.purchases.map((p) => `<li>${p.units}× ${esc(p.name)} · ${p.platinum}p each</li>`).join("")}</ul>
+    <ul>${route.purchases.map((p) => `<li>${p.units}× ${marketLink(p.item_slug, p.name)} · ${p.platinum}p each</li>`).join("")}</ul>
     <button class="act" data-route="${i}">copy ${route.purchases.length === 1 ? "whisper" : "whispers"}</button>
   </article>`).join("");
 }
@@ -544,7 +574,7 @@ async function recordBought(row, btn) {
       name: "paid",
       label: "Paid per unit (platinum)",
       type: "number",
-      value: row.buyAt,
+      value: Math.round(row.buyAt),
       required: true,
       hint:
         `model assumed ${row.buyAt}p` +
@@ -556,10 +586,10 @@ async function recordBought(row, btn) {
       name: "target",
       label: "Target sell price per unit (platinum)",
       type: "number",
-      value: row.sellAt,
+      value: Math.floor(row.sellAt),
       hint: "exit alerts fire against this — you can change it later on the Trades tab",
     },
-  ]);
+  ], { intro: `${marketLink(row.item_slug ?? row.slug, row.name)} <span class="hint-inline">confirm the listing is still there before paying</span>` });
   if (!form) return;
   await act(btn, async () => {
     await api("/api/trades", {
@@ -595,16 +625,45 @@ function copyPartWhisper(btn, part, setName) {
   }));
 }
 
-const CHECKLIST_KEY = "platwatch:set-checklists:v1";
-function checklists() {
-  try { return JSON.parse(localStorage.getItem(CHECKLIST_KEY) || "{}"); }
-  catch { return {}; }
+// Set checklists live in SQLite (src/trade/checklists.ts), so they survive a
+// cleared browser, another machine, restarts and backups. This key is read
+// once, to move progress saved by older versions into the database.
+const LEGACY_CHECKLIST_KEY = "platwatch:set-checklists:v1";
+let checklistStore = new Map();
+async function loadChecklists() {
+  const list = await api("/api/checklists");
+  checklistStore = new Map(list.map((c) => [c.setItemId, c]));
+  return list;
 }
-function checklistFor(row) { return checklists()[row.itemId] || {}; }
+async function importLegacyChecklists() {
+  let legacy = null;
+  try { legacy = JSON.parse(localStorage.getItem(LEGACY_CHECKLIST_KEY) || "null"); } catch {}
+  if (!legacy || typeof legacy !== "object" || !Object.keys(legacy).length) return;
+  const { imported } = await api("/api/checklists/import", {
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ checklists: legacy }),
+  });
+  try { localStorage.removeItem(LEGACY_CHECKLIST_KEY); } catch {}
+  if (imported) toast(`Moved ${imported} set checklist${imported === 1 ? "" : "s"} from this browser into the PlatWatch database.`);
+}
+function checklistFor(row) { return checklistStore.get(row.itemId)?.entries || {}; }
+// Saves for one set run in order, so a slow request cannot land after a newer one.
+const checklistSaves = new Map();
 function saveChecklist(row, state) {
-  const all = checklists();
-  all[row.itemId] = state;
-  localStorage.setItem(CHECKLIST_KEY, JSON.stringify(all));
+  const entries = structuredClone(state);
+  const prior = checklistStore.get(row.itemId);
+  checklistStore.set(row.itemId, {
+    ...(prior ?? { setItemId: row.itemId, name: row.name, item_slug: row.item_slug, status: "active", currentRow: row }),
+    entries, row,
+  });
+  const run = (checklistSaves.get(row.itemId) ?? Promise.resolve()).then(async () => {
+    const saved = await api(`/api/checklists/${encodeURIComponent(row.itemId)}`, {
+      method: "PUT", headers: JSON_HEADERS, body: JSON.stringify({ entries, row }),
+    });
+    const now = checklistStore.get(row.itemId);
+    checklistStore.set(row.itemId, { ...now, ...saved, entries: now.entries, currentRow: now.currentRow });
+  }).catch((err) => toast(`Checklist not saved: ${describeError(err)}`, "error"));
+  checklistSaves.set(row.itemId, run);
+  return run;
 }
 function checklistEntryKey(part, fill, partIndex, fillIndex) {
   const order = fill?.orderId;
@@ -632,7 +691,7 @@ function checklistProgress(row) {
 /** One dialog listing every component to acquire, each with its own whisper. */
 async function showParts(row) {
   const modal = $("#modal");
-  const state = checklistFor(row);
+  const state = structuredClone(checklistFor(row));
   const updateTitle = () => {
     const entries = checklistEntries(row);
     const total = entries.length;
@@ -651,7 +710,7 @@ async function showParts(row) {
   };
   updateTitle();
   $("#modal-ok").textContent = "Close";
-  $("#modal-fields").outerHTML = `<div class="parts" id="modal-fields"><div class="hint-inline" id="check-summary"></div>${row.parts
+  $("#modal-fields").outerHTML = `<div class="parts" id="modal-fields"><div class="modal-intro">${marketLink(row.item_slug ?? row.slug, row.name)}</div><div class="hint-inline" id="check-summary"></div>${row.parts
     .flatMap((p, i) => (p.fills?.length ? p.fills : [{
       seller: p.seller, units: p.qty, platinum: p.each, whisper: p.whisper,
     }]).map((fill, k) => {
@@ -660,7 +719,7 @@ async function showParts(row) {
       const paid = typeof state[key] === "object" ? state[key].paid ?? "" : "";
       return `<div class="part${status === "purchased" ? " acquired" : ""}" data-check-row="${key}">
         <label class="part-check">
-          <span class="pn"><span class="pq">${fill.units || p.qty}×</span> ${esc(p.name)}
+          <span class="pn"><span class="pq">${fill.units || p.qty}×</span> ${marketLink(p.item_slug, p.name)}
             <span class="hint-inline">${fill.platinum == null ? "unpriced" : fill.platinum + "p each"}${
               fill.seller ? " · " + esc(fill.seller.ingameName) : " · no live seller"
             }</span></span></label>
@@ -669,15 +728,39 @@ async function showParts(row) {
         ${fill.whisper ? `<button type="button" class="act" data-part="${i}" data-fill="${k}">copy</button>` : ""}
       </div>`;
     }))
-    .join("")}<button type="button" class="act" data-replace="1">verify markets / find replacements</button></div>`;
+    .join("")}<button type="button" class="act" data-replace="1">verify markets / find replacements</button>
+    <div class="check-actions"><button type="button" class="act" data-check-status="assembled">mark assembled</button>
+      <button type="button" class="act" data-check-status="removed">remove checklist</button></div></div>`;
   updateTitle();
 
   const onClick = async (e) => {
     const b = e.target.closest("button[data-part]");
     const replacement = e.target.closest("button[data-replace]");
+    const closing = e.target.closest("button[data-check-status]");
+    if (closing) {
+      const status = closing.dataset.checkStatus;
+      const ok = await act(closing, async () => {
+        // Record the latest progress before closing it out.
+        await saveChecklist(row, state);
+        await api(`/api/checklists/${encodeURIComponent(row.itemId)}/status`, {
+          method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ status }),
+        });
+      });
+      if (ok) {
+        modal.close();
+        toast(status === "removed" ? `Removed the ${row.name} checklist.` : `${row.name} marked assembled.`);
+        loadToday();
+      }
+      return;
+    }
     if (replacement) {
       const result = await verifyRow(row, replacement);
-      if (result) { modal.close(); await loadSets(); const fresh = setList.find((x) => x.itemId === row.itemId); if (fresh) showParts(fresh); }
+      if (result) {
+        modal.close();
+        await Promise.all([loadSets(), loadChecklists()]);
+        const fresh = setList.find((x) => x.itemId === row.itemId) ?? checklistStore.get(row.itemId)?.currentRow;
+        showParts(fresh ?? row);
+      }
       return;
     }
     if (!b) return;
@@ -771,7 +854,7 @@ function setBreakdownHtml(r, i) {
     const short = p.subtotal === null && p.each !== null;
     return `<tr>
       <td class="r pq">${p.qty}×</td>
-      <td>${esc(p.name)}</td>
+      <td>${marketLink(p.item_slug, p.name)}</td>
       <td class="r num" title="cheapest reachable ask">${p.each === null ? "–" : p.each + "p"}</td>
       <td class="r num">${p.subtotal !== null ? p.subtotal + "p"
         : short ? `<span class="why" title="only ${p.available} of ${p.qty} on sale from sellers you can reach">${p.available} of ${p.qty}</span>`
@@ -829,6 +912,8 @@ async function fetchSets() {
 }
 
 $("#sets").addEventListener("click", async (e) => {
+  // A warframe.market link opens its page; it must not also fold the row.
+  if (e.target.closest("a")) return;
   const tr = e.target.closest("tr[data-i]");
   if (!tr) return;
   const row = setList[Number(tr.dataset.i)];
@@ -875,6 +960,43 @@ $("#set-held").addEventListener("change", loadSets);
 $("#set-refresh").addEventListener("click", loadSets);
 
 let alertList = [];
+/** Repeated alerts (same item, variant, side and price) expanded by the user. */
+const openAlertGroups = new Set();
+let showSuspicious = false;
+
+const alertGroupKey = (a) => `${a.item_id}|${a.variant}|${a.kind}|${a.platinum}`;
+
+function alertRowHtml(a, i, group) {
+  const side = a.kind === "underpriced_sell" ? "buy" : "sell";
+  const whisper = `/w ${a.ingame_name} Hi! I want to ${side}: "${a.item_name}" for ${a.platinum} platinum. (warframe.market)`;
+  const fired = new Date(a.fired_at);
+  const today = fired.toDateString() === new Date().toDateString();
+  // Strong only with fresh sourcing evidence; otherwise the row says to check first.
+  const evidence = a.suspicious ? ""
+    : a.actionable
+      ? `<span class="tag good" title="${esc(a.sourcingDetail)}">actionable</span>`
+      : `<span class="tag warn" title="${esc(a.sourcingDetail)}">verify first</span>`;
+  const repeats = group.head && group.count > 1
+    ? `<button class="act group-toggle" data-group="${esc(group.key)}" aria-expanded="${group.open}"
+         title="The same item and price fired ${group.count} times">×${group.count} ${group.open ? "▾" : "▸"}</button>` : "";
+  const outcome = (value, label) => `<option value="${value}" ${a.outcome === value ? "selected" : ""}>${label}</option>`;
+  return `<tr data-i="${i}" class="${group.head ? "" : "alert-repeat"}${a.actionable ? "" : " unverified"}">
+    <td class="num" title="${esc(fired.toLocaleString())}">${today ? fired.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : fired.toLocaleDateString([], { month: "short", day: "numeric" })}</td>
+    <td class="kind">${a.kind === "underpriced_sell" ? "buy it" : "sell to them"}</td>
+    <td>${itemName(a, a.item_name)}${a.suspicious ? '<span class="tag bad" title="so far off the market it is more likely a mistake or bait">suspicious</span>' : ""}${repeats}</td>
+    <td class="r num">${fmtNum(a.platinum)}<span class="u">p</span></td>
+    <td class="r num">${fmtNum(a.reference)}<span class="u">p</span></td>
+    <td class="r num ${a.actionable ? "margin" : "muted"}">+${fmtNum(a.profit)}<span class="u">p</span><span class="sub">${evidence}</span></td>
+    <td class="r num">${trendTag(a.trend, a.median7d, a.median30d) || '<span class="u">flat</span>'}</td>
+    <td class="r num">${a.volume_48h ?? "–"}</td>
+    <td class="who">${esc(a.ingame_name)} <span class="rate none">${esc(a.user_status)}</span></td>
+    <td><button class="act" data-w="${esc(whisper)}" aria-label="Copy whisper to ${esc(a.ingame_name)}">copy</button></td>
+    <td><select data-outcome="1" aria-label="Outcome for ${esc(a.item_name)}"><option value="">not reviewed</option>${outcome("bought", a.kind === "underpriced_sell" ? "bought" : "sold")}${outcome("already_gone", "already gone")}${outcome("no_reply", "no reply")}${outcome("margin_disappeared", "margin disappeared")}</select>${
+      a.outcome === "bought" && !a.trade_linked ? '<button class="act" data-act="journal-alert">add to trades</button>' : ""}${
+      a.trade_linked ? '<span class="sub">in Trades &amp; P&amp;L</span>' : ""}${
+      a.realised_profit != null ? `<span class="sub margin">${signed(Math.round(a.realised_profit))}p realised</span>` : ""}</td>
+  </tr>`;
+}
 
 function renderAlerts() {
   const q = $("#alert-filter").value.trim().toLowerCase();
@@ -888,32 +1010,36 @@ function renderAlerts() {
       : "No alerts yet. The live watcher fires them as underpriced listings appear.");
     return;
   }
-  body.innerHTML = shown.map(([a, i]) => {
-    const side = a.kind === "underpriced_sell" ? "buy" : "sell";
-    const whisper = `/w ${a.ingame_name} Hi! I want to ${side}: "${a.item_name}" for ${a.platinum} platinum. (warframe.market)`;
-    const fired = new Date(a.fired_at);
-    const today = fired.toDateString() === new Date().toDateString();
-    return `<tr data-i="${i}">
-      <td class="num" title="${esc(fired.toLocaleString())}">${today ? fired.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : fired.toLocaleDateString([], { month: "short", day: "numeric" })}</td>
-      <td class="kind">${a.kind === "underpriced_sell" ? "buy it" : "sell to them"}</td>
-      <td>${itemName(a, a.item_name)}${a.suspicious ? '<span class="tag bad" title="so far off the market it is more likely a mistake or bait">suspicious</span>' : ""}</td>
-      <td class="r num">${plat(a.platinum)}</td>
-      <td class="r num">${plat(a.reference)}</td>
-      <td class="r num margin">+${a.profit}<span class="u">p</span></td>
-      <td class="r num">${trendTag(a.trend, a.median7d, a.median30d) || '<span class="u">flat</span>'}</td>
-      <td class="r num">${a.volume_48h ?? "–"}</td>
-      <td class="who">${esc(a.ingame_name)} <span class="rate none">${esc(a.user_status)}</span></td>
-      <td><button class="act" data-w="${esc(whisper)}">copy</button></td>
-      <td><select data-outcome="1"><option value="">not reviewed</option><option value="bought" ${a.outcome === "bought" ? "selected" : ""}>${a.kind === "underpriced_sell" ? "bought" : "sold"}</option><option value="already_gone" ${a.outcome === "already_gone" ? "selected" : ""}>already gone</option><option value="no_reply" ${a.outcome === "no_reply" ? "selected" : ""}>no reply</option><option value="margin_disappeared" ${a.outcome === "margin_disappeared" ? "selected" : ""}>margin disappeared</option></select>${a.outcome === "bought" && !a.trade_id ? '<button class="act" data-act="journal-alert">add to trades</button>' : ""}${a.realised_profit != null ? `<span class="sub margin">${signed(a.realised_profit)}p realised</span>` : ""}</td>
-    </tr>`;
-  }).join("");
+  // One row per item and price, newest first; the repeats fold underneath it.
+  const rowsFor = (list) => {
+    const groups = new Map();
+    for (const [a, i] of list) {
+      const key = alertGroupKey(a);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push([a, i]);
+    }
+    return [...groups].map(([key, members]) => {
+      const open = openAlertGroups.has(key);
+      return members.map(([a, i], k) => k === 0 || open
+        ? alertRowHtml(a, i, { key, count: members.length, head: k === 0, open }) : "").join("");
+    }).join("");
+  };
+  const genuine = shown.filter(([a]) => !a.suspicious);
+  const suspicious = shown.filter(([a]) => a.suspicious);
+  const cols = $("#alerts thead tr").children.length;
+  body.innerHTML = rowsFor(genuine) + (suspicious.length
+    ? `<tr class="suspicious-toggle"><td colspan="${cols}"><button class="act" data-act="toggle-suspicious" aria-expanded="${showSuspicious}">${
+        showSuspicious ? "Hide" : "Show"} ${suspicious.length} suspicious alert${suspicious.length === 1 ? "" : "s"}</button>
+        <span class="sub" style="display:inline">priced so far off the market they are more likely mistakes or bait</span></td></tr>` +
+      (showSuspicious ? rowsFor(suspicious) : "")
+    : "");
 }
 sortRenderers.alerts = () => renderAlerts();
 
 async function fetchAlerts() {
   const [alerts, performance] = await Promise.all([api("/api/alerts"), api("/api/alerts/performance")]);
   alertList = alerts;
-  $("#alert-performance").textContent = `${performance.reviewed}/${performance.total} reviewed · ${performance.conversionRate == null ? "–" : Math.round(performance.conversionRate*100)+"%"} bought · ${signed(performance.realisedProfit)}p realised`;
+  $("#alert-performance").textContent = `${performance.reviewed}/${performance.total} reviewed · ${performance.conversionRate == null ? "–" : Math.round(performance.conversionRate*100)+"%"} bought · ${signed(performance.realisedProfit)}p realised across ${performance.realisedLots} sale${performance.realisedLots === 1 ? "" : "s"}`;
   $("#alert-recommendations").hidden=!performance.recommendations.length;
   $("#alert-recommendations").textContent=performance.recommendations.join(" ");
   renderAlerts();
@@ -921,10 +1047,22 @@ async function fetchAlerts() {
 
 $("#alerts").addEventListener("click", async (e) => {
   const btn = e.target.closest("button");
-  if (!btn || !btn.closest("tr[data-i]")) return;
+  if (!btn) return;
+  if (btn.dataset.act === "toggle-suspicious") {
+    showSuspicious = !showSuspicious;
+    renderAlerts();
+    return;
+  }
+  if (btn.dataset.group !== undefined) {
+    if (openAlertGroups.has(btn.dataset.group)) openAlertGroups.delete(btn.dataset.group);
+    else openAlertGroups.add(btn.dataset.group);
+    renderAlerts();
+    return;
+  }
+  if (!btn.closest("tr[data-i]")) return;
   const a = alertList[Number(btn.closest("tr").dataset.i)];
   if (btn.dataset.act === "chart") {
-    showHistory({ itemId: a.item_id, variant: a.variant, name: a.item_name },
+    showHistory({ itemId: a.item_id, variant: a.variant, name: a.item_name, item_slug: a.item_slug },
       a.kind === "underpriced_sell" ? { buyAt: a.platinum, sellAt: a.reference } : { buyAt: a.reference, sellAt: a.platinum });
     return;
   }
@@ -936,12 +1074,11 @@ $("#alerts").addEventListener("click", async (e) => {
       note: `live alert: ${a.kind}`,
     }));
   }
+  // Repair: an outcome recorded as bought/sold before trades were linked to it.
   if (btn.dataset.act === "journal-alert") {
-    const tradeId = await recordAlertTrade(a);
-    if (tradeId) {
-      await api(`/api/alerts/${a.id}/feedback`, { method:"PATCH", headers:{"content-type":"application/json"}, body:JSON.stringify({outcome:"bought", tradeId}) });
-      toast("Trade added to the journal."); await fetchAlerts(); loadStatus();
-    }
+    await act(btn, async () => {
+      if (await recordAlertOutcome(a)) { await fetchAlerts(); loadStatus(); }
+    });
   }
 });
 $("#alert-filter").addEventListener("input", renderAlerts);
@@ -954,7 +1091,16 @@ async function loadSettings(){ const s=await api("/api/settings");
   $("#setting-profit").value=s.alert.minProfit; $("#setting-volume").value=s.alert.minVolume48h;
   const h=await api("/api/status"); const age=(iso)=>iso?Math.max(0,Math.round((Date.now()-Date.parse(iso))/60000))+"m ago":"never";
   $("#health-poll").textContent=h.livePoll.lastError?"failed":age(h.livePoll.lastSuccess);
-  for(const n of h.notifications){ const el=$("#health-"+n.name); el.textContent=!n.configured?"not set":n.lastError?"failed":n.lastSuccess?age(n.lastSuccess):"ready"; el.title=n.lastError||`${n.pending} queued`; }
+  // What the running daemon actually has switched on — "disabled" for toasts under --no-toast.
+  for (const n of h.notifications) {
+    const el = $("#health-" + n.name);
+    el.textContent = n.state === "unknown" ? "unknown"
+      : !n.enabled ? (n.name === "discord" ? "not set" : "disabled")
+      : n.lastError ? "enabled · failing"
+      : n.lastSuccess ? `enabled · sent ${age(n.lastSuccess)}` : "enabled";
+    el.dataset.state = n.enabled ? (n.lastError ? "failing" : "enabled") : "disabled";
+    el.title = [n.detail, n.lastError, n.name === "discord" ? `${n.pending} queued` : ""].filter(Boolean).join(" · ");
+  }
   const backups=await api("/api/backups"); $("#backup-list").innerHTML=backups.length?backups.map(b=>`<button class="act" data-restore="${esc(b.name)}">restore ${new Date(b.modifiedAt).toLocaleString()} · ${(b.bytes/1048576).toFixed(1)} MB</button>`).join(""):"No backups yet.";
 }
 $("#settings-form").addEventListener("submit",async(e)=>{e.preventDefault(); const body={discordWebhook:$("#setting-webhook").value,defaultBudget:Number($("#setting-budget").value),maxPerItem:Number($("#setting-cap").value),cashReserve:Number($("#setting-reserve").value),maxPerGroup:Number($("#setting-group-cap").value),minConfidence:$("#setting-confidence").value,pollSeconds:Number($("#setting-poll").value),alert:{sellDiscount:Number($("#setting-discount").value)/100,buyPremium:Number($("#setting-premium").value)/100,minProfit:Number($("#setting-profit").value),minVolume48h:Number($("#setting-volume").value)}}; await api("/api/settings",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(body)}); $("#plan-budget").value=body.defaultBudget; $("#plan-cap").value=body.maxPerItem; $("#plan-reserve").value=body.cashReserve; $("#plan-group-cap").value=body.maxPerGroup; $("#plan-conf").value=body.minConfidence; toast("Settings saved and applied.");});
@@ -970,7 +1116,7 @@ async function fetchLog() {
   }
   body.innerHTML = list.map((w) => `<tr data-id="${w.id}">
     <td class="num">${new Date(w.sent_at).toLocaleString()}</td>
-    <td>${esc(w.item_name)}</td>
+    <td>${marketLink(w.item_slug, w.item_name)}</td>
     <td class="who">${esc(w.ingame_name)}</td>
     <td class="r num">${w.platinum}</td>
     <td>
@@ -1048,7 +1194,7 @@ async function fetchTrades() {
         const unreal = open && t.marketNow !== null ? (t.marketNow - t.buyPrice) * t.quantity : null;
         return `<tr data-i="${i}">
           <td>${itemName(t)}${t.variant ? `<span class="variant">${esc(t.variant)}</span>` : ""}
-              <div class="kind">${esc(t.source)}</div></td>
+              <div class="kind">${esc(t.source)}${t.parentTradeId ? ` · sold from #${t.parentTradeId}` : ` · #${t.id}`}${t.alertId ? ` · alert #${t.alertId}` : ""}</div></td>
           <td class="r num">${t.quantity}</td>
           <td class="r num">${plat(t.buyPrice)}</td>
           <td class="r num">${open
@@ -1068,7 +1214,7 @@ async function fetchTrades() {
     : `<tr><td colspan="9" class="empty">Nothing yet. Use "bought" on an opportunity to open a position.</td></tr>`;
 }
 
-const fmtHeld = (h) => (h < 48 ? `${h}h` : `${(h / 24).toFixed(1)}d`);
+const fmtHeld = (h) => (h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 48 ? `${Math.round(h)}h` : `${(h / 24).toFixed(1)}d`);
 
 /**
  * Exit signals for an open position — the sell leg is where platinum sits
@@ -1100,12 +1246,14 @@ function decisionCell(t) {
   const d = t.sellDecision;
   if (!d) return adviceCell(t);
   const tone = d.kind === "sell_now" ? "good" : d.kind === "reprice" || d.kind === "review" ? "warn" : "none";
-  const canApply = d.price !== null && d.price !== t.targetPrice && d.kind !== "sell_now";
-  const canCopy = d.price !== null && d.kind !== "sell_now";
+  // A listing is whole platinum even when the prediction behind it is not.
+  const price = d.price === null ? null : Math.round(d.price);
+  const canApply = price !== null && price !== (t.targetPrice == null ? null : Math.round(t.targetPrice)) && d.kind !== "sell_now";
+  const canCopy = price !== null && d.kind !== "sell_now";
   return `<div class="decision"><div><span class="tag ${tone}" style="margin-left:0">${esc(d.label)}</span>
     <span class="sub" style="display:inline">${esc(d.detail)}</span></div>
-    <div class="decision-actions">${canApply ? `<button class="act" data-act="apply-price" data-price="${d.price}">use ${d.price}p target</button>` : ""}
-    ${canCopy ? `<button class="act" data-act="copy-listing" data-price="${d.price}">copy listing</button>` : ""}
+    <div class="decision-actions">${canApply ? `<button class="act" data-act="apply-price" data-price="${price}">use ${price}p target</button>` : ""}
+    ${canCopy ? `<button class="act" data-act="copy-listing" data-price="${price}">copy listing</button>` : ""}
     ${d.kind === "sell_now" ? exitCell(t) : ""}</div></div>`;
 }
 
@@ -1121,17 +1269,23 @@ function adviceCell(t) {
   const a = t.advice;
   if (!a || a.fairPrice === null) return `<span class="rate none">no price data</span>`;
 
+  // Each wait is labelled with the price it applies to: the fair-price wait is
+  // not how long a higher target takes.
   const wait =
     a.estimatedDaysAtFair === null
       ? "no volume to estimate"
       : a.queueAtFair === 0
-        ? `first in queue, ~${a.dailyVolume}/day`
-        : `${a.queueAtFair} ahead · ~${a.estimatedDaysAtFair}d`;
+        ? `at ${a.fairPrice}p: first in queue, ~${a.dailyVolume}/day`
+        : `at ${a.fairPrice}p: ${a.queueAtFair} ahead · ${fmtDays(a.estimatedDaysAtFair)}`;
+  const e = t.targetEstimate;
+  const atTarget = !e ? ""
+    : e.days === null ? ` · at your ${Math.round(e.price)}p target: ${e.basis}`
+    : ` · at your ${Math.round(e.price)}p target: ${fmtDays(e.days)} (${e.queue} below)`;
 
   return `<span class="play"><b>${a.fairPrice}p</b>${
     a.quickPrice !== null && a.quickPrice !== a.fairPrice ? ` · quick ${a.quickPrice}p` : ""
   }${a.patientPrice !== null && a.patientPrice > a.fairPrice ? ` · patient ${a.patientPrice}p` : ""}</span>
-    <div class="hint-inline">${esc(wait)}${
+    <div class="hint-inline">${esc(wait + atTarget)}${
       a.bookAboveMarket ? " · book sits above the traded range" : ""
     }</div>`;
 }
@@ -1184,7 +1338,7 @@ $("#trades").addEventListener("click", async (e) => {
         name: "target",
         label: "Sell at, per unit (platinum)",
         type: "number",
-        value: t.targetPrice ?? "",
+        value: t.targetPrice == null ? "" : Math.round(t.targetPrice),
         required: true,
         hint:
           `bought at ${t.buyPrice}p` +
@@ -1245,7 +1399,7 @@ $("#trades").addEventListener("click", async (e) => {
         (t.advice && t.advice.fairPrice !== null ? `, clears around ${t.advice.fairPrice}p` : ""),
     },
     { name: "to", label: "Sold to (optional)" },
-  ]);
+  ], { intro: marketLink(t.item_slug, t.name) });
   if (!form) return;
   const ok = await act(btn, () => api("/api/trades/" + t.id, {
     method: "PATCH",
@@ -1281,7 +1435,7 @@ function renderDucats() {
   const rows = sortRows("ducats", ducatList);
   $("#ducats tbody").innerHTML = rows.length
     ? rows.map((r) => `<tr>
-        <td><span class="name">${esc(r.name)}</span></td>
+        <td>${marketLink(r.item_slug, r.name)}</td>
         <td class="r num">${r.ducats}</td>
         <td class="r num">${plat(r.buyAt)}</td>
         <td class="r num margin">${r.ducatsPerPlat}</td>
@@ -1307,7 +1461,8 @@ async function showHistory(item, refs = {}) {
   const dlg = $("#history");
   hist.refs = refs;
   hist.data = null;
-  $("#hist-title").textContent = item.name + (item.variant ? ` (${item.variant})` : "");
+  $("#hist-title").innerHTML = marketLink(item.item_slug ?? item.slug, item.name) +
+    (item.variant ? ` <span class="variant">${esc(item.variant)}</span>` : "");
   $("#hist-summary").textContent = "Loading price history…";
   $("#hist-body").innerHTML = "";
   paintHistControls();
@@ -1520,10 +1675,10 @@ $("#why").addEventListener("click", (e) => { if (e.target === $("#why")) $("#why
 
 function showWhy(row) {
   const s = row.profitScenarios;
-  $("#why-title").textContent = `Why ${row.name}?`;
+  $("#why-title").innerHTML = `Why ${marketLink(row.item_slug ?? row.slug, row.name)}?`;
   $("#why-summary").textContent = `${row.kind} · ${row.buyAt}p outlay · ${row.riskScore}/100 confidence score`;
   const scenario = (label, value, note) => `<tr><td>${label}</td><td class="r num">${value ? value.sellAt + "p" : "–"}</td><td class="r num ${value && value.profit > 0 ? "margin" : "loss"}">${value ? signed(value.profit) + "p" : "no reachable bid"}</td><td>${note}</td></tr>`;
-  const parts = row.parts?.length ? `<h4>Component evidence</h4><table><tbody>${row.parts.map((p) => `<tr><td>${p.qty}× ${esc(p.name)}</td><td class="r">${p.subtotal}p</td><td>${p.fills.map((f) => `${esc(f.seller.ingameName)}: ${f.units} at ${f.platinum}p`).join(" · ")}</td></tr>`).join("")}</tbody></table>` : "";
+  const parts = row.parts?.length ? `<h4>Component evidence</h4><table><tbody>${row.parts.map((p) => `<tr><td>${p.qty}× ${marketLink(p.item_slug, p.name)}</td><td class="r">${p.subtotal}p</td><td>${p.fills.map((f) => `${esc(f.seller.ingameName)}: ${f.units} at ${f.platinum}p`).join(" · ")}</td></tr>`).join("")}</tbody></table>` : "";
   $("#why-body").innerHTML = `<div class="parts">
     <h4>Profit scenarios</h4><table><thead><tr><th>Exit</th><th class="r">Sell at</th><th class="r">Profit</th><th>Meaning</th></tr></thead><tbody>
       ${scenario("Proposed listing", s.proposed, "Current book and ranking policy")}
@@ -1570,56 +1725,138 @@ $("#backup-now").addEventListener("click", async (e) => {
   const result = await act(e.currentTarget, () => api("/api/backup", { method:"POST" }));
   if (result) { toast(`Backup saved (${(result.bytes / 1_048_576).toFixed(1)} MB).`); loadStatus(); }
 });
-async function recordAlertTrade(a) {
-  if (a.kind === "underpriced_sell") {
-    const form=await askForm(`Bought ${a.item_name}`, [{name:"buyPrice",label:"Price paid",value:a.platinum,type:"number"},{name:"targetPrice",label:"Sell target",value:a.reference,type:"number"}]);
-    if(!form)return null;
-    const trade=await api("/api/trades",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({itemId:a.item_id,variant:a.variant,buyPrice:Number(form.buyPrice),expectedSell:a.reference,expectedMargin:a.profit,targetPrice:Number(form.targetPrice),boughtFrom:a.ingame_name,source:"alert"})});
-    return trade.id;
-  }
-  const form=await askForm(`Sold ${a.item_name}`, [{name:"buyPrice",label:"Your original cost per unit",type:"number",required:true},{name:"sellPrice",label:"Sale price per unit",value:a.platinum,type:"number",required:true}]);
-  if(!form)return null;
-  const trade=await api("/api/trades",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({itemId:a.item_id,variant:a.variant,buyPrice:Number(form.buyPrice),expectedSell:a.platinum,expectedMargin:a.profit,targetPrice:Number(form.sellPrice),soldTo:a.ingame_name,source:"alert"})});
-  await api(`/api/trades/${trade.id}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({sellPrice:Number(form.sellPrice),soldTo:a.ingame_name})});
-  return trade.id;
+/**
+ * Record what an alert became, as ONE server operation that creates the trade
+ * and links it to the alert together. A retry — after a lost response, or a
+ * second click — gets the trade already recorded back, never a duplicate.
+ * Resolves to the server's result, or null when the dialog was cancelled.
+ */
+async function submitAlertTrade(a, body) {
+  const result = await api(`/api/alerts/${a.id}/trade`, {
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+  });
+  toast(result.duplicate
+    ? `Already recorded — ${a.item_name} is on Trades & P&L; nothing was duplicated.`
+    : body.mode === "purchase"
+      ? `Recorded ${a.item_name} as an open position on Trades & P&L.`
+      : `Recorded the sale of ${a.item_name} on Trades & P&L.`);
+  return result;
 }
-$("#alerts").addEventListener("change", async (e) => {
-  const select=e.target.closest("select[data-outcome]"); if(!select || !select.value) return;
-  const a=alertList[Number(select.closest("tr").dataset.i)]; let tradeId;
-  if(select.value==="bought") {
-    tradeId=await recordAlertTrade(a);
-    if(!tradeId){ select.value=a.outcome||""; return; }
+
+async function recordAlertOutcome(a) {
+  const intro = marketLink(a.item_slug, a.item_name);
+  if (a.kind === "underpriced_sell") {
+    const form = await askForm(`Bought ${a.item_name}`, [
+      { name: "buyPrice", label: "Paid per unit (platinum)", type: "number", value: a.platinum, required: true,
+        hint: `${a.ingame_name} listed it at ${fmtNum(a.platinum)}p` },
+      { name: "qty", label: "Quantity", type: "number", value: 1, min: 1, required: true },
+      { name: "targetPrice", label: "Sell target per unit (platinum)", type: "number", min: 1, required: true,
+        value: Math.max(1, Math.floor(a.reference)),
+        hint: `resale reference ${fmtNum(a.reference)}p, rounded down to a whole-platinum listing` },
+    ], { intro: `${intro} <span class="hint-inline">confirm the listing is still there before paying</span>` });
+    if (!form) return null;
+    return submitAlertTrade(a, {
+      mode: "purchase", buyPrice: Number(form.buyPrice), quantity: Number(form.qty), targetPrice: Number(form.targetPrice),
+    });
   }
 
-  await api(`/api/alerts/${a.id}/feedback`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({outcome:select.value,...(tradeId?{tradeId}:{})})});
-  toast("Alert outcome saved."); await fetchAlerts(); loadStatus();
+  // A sale reduces inventory you already hold, so its profit comes from what
+  // that position really cost. Only without one is an untracked sale offered.
+  const positions = await api(`/api/alerts/${a.id}/positions`);
+  const saleFields = (qty) => [
+    { name: "qty", label: "Quantity sold", type: "number", value: qty, min: 1, required: true },
+    { name: "sellPrice", label: "Sold for per unit (platinum)", type: "number", value: a.platinum, required: true,
+      hint: `${a.ingame_name} bid ${fmtNum(a.platinum)}p` },
+  ];
+  if (positions.length) {
+    const form = await askForm(`Sold ${a.item_name}`, [
+      { name: "position", label: "Sold from", type: "select", value: String(positions[0].id), options: [
+        ...positions.map((p) => ({
+          value: String(p.id),
+          label: `#${p.id} · ${p.quantity} held at ${p.buyPrice}p each${p.boughtFrom ? ` from ${p.boughtFrom}` : ""}`,
+        })),
+        { value: "untracked", label: "Record untracked sale (enter the original cost)" },
+      ] },
+      ...saleFields(1),
+    ], { intro });
+    if (!form) return null;
+    if (form.position !== "untracked") {
+      return submitAlertTrade(a, {
+        mode: "position", tradeId: Number(form.position), quantity: Number(form.qty), sellPrice: Number(form.sellPrice),
+      });
+    }
+  }
+  const form = await askForm(`Record untracked sale · ${a.item_name}`, [
+    { name: "buyPrice", label: "Original cost per unit (platinum)", type: "number", value: "", required: true,
+      hint: "No tracked position is being sold, so the profit needs what you paid." },
+    ...saleFields(1),
+  ], {
+    intro: `${intro}${positions.length ? "" : '<p class="hint-inline">No open position for this item is tracked.</p>'}`,
+    okLabel: "Record untracked sale",
+  });
+  if (!form) return null;
+  return submitAlertTrade(a, {
+    mode: "untracked", buyPrice: Number(form.buyPrice), quantity: Number(form.qty), sellPrice: Number(form.sellPrice),
+  });
+}
+
+$("#alerts").addEventListener("change", async (e) => {
+  const select = e.target.closest("select[data-outcome]");
+  if (!select || !select.value) return;
+  const a = alertList[Number(select.closest("tr").dataset.i)];
+  select.disabled = true;
+  try {
+    if (select.value === "bought") {
+      if (!(await recordAlertOutcome(a))) { select.value = a.outcome || ""; return; }
+    } else {
+      await api(`/api/alerts/${a.id}/feedback`, {
+        method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ outcome: select.value }),
+      });
+      toast("Alert outcome saved.");
+    }
+    await fetchAlerts();
+    loadStatus();
+  } catch (err) {
+    select.value = a.outcome || "";
+    toast(`Outcome not saved: ${describeError(err)} Selecting it again is safe — it will not duplicate the trade.`, "error");
+  } finally {
+    select.disabled = false;
+  }
 });
 
 let todayItems = [];
 function loadToday() { return loadView("today", fetchToday); }
 async function fetchToday() {
-  const [tradeRows, sets, plan] = await Promise.all([
-    api("/api/trades?limit=300"), api("/api/opportunities?kind=set&limit=1000"),
+  const [tradeRows, lists, plan] = await Promise.all([
+    api("/api/trades?limit=300"), loadChecklists(),
     api("/api/plan?budget=" + encodeURIComponent($("#plan-budget").value || "500") + "&minConfidence=medium&cashReserve=" + encodeURIComponent($("#plan-reserve").value || "0") + "&maxPerGroup=" + encodeURIComponent($("#plan-group-cap").value || "6")),
   ]);
   const urgent = tradeRows.filter((t) => t.profit === null && t.sellDecision?.kind !== "hold")
     .map((row) => ({ type: "exit", row }));
-  const saved = checklists();
-  const unfinished = sets.filter((row) => {
-    if (!saved[row.itemId]) return false;
-    const entries = checklistEntries(row);
-    const bought = entries.filter((key) => checklistStatus(saved[row.itemId][key]) === "purchased").length;
-    return bought < entries.length;
-  }).map((row) => ({ type: "checklist", row }));
+  // Every active checklist, whether or not the set still ranks: platinum
+  // already spent on parts has to be followed through, or deliberately dropped.
+  const unfinished = lists.map((checklist) => ({
+    type: "checklist", checklist,
+    row: checklist.row ?? { itemId: checklist.setItemId, name: checklist.name, item_slug: checklist.item_slug, parts: [] },
+  }));
   const next = plan.picks.slice(0, 5).map((row) => ({ type: "opportunity", row }));
   todayItems = [...urgent, ...unfinished, ...next];
+  if (setList.length) renderSets();
   $("#today-count").textContent = `${urgent.length} exits · ${unfinished.length} unfinished sets · ${next.length} next trades`;
   const body = $("#today tbody");
   body.innerHTML = todayItems.length ? todayItems.map((item, i) => {
     const r = item.row;
-    if (item.type === "exit") return `<tr data-i="${i}"><td><span class="tag warn">position</span></td><td><b>${esc(r.name)}</b><span class="sub">${r.quantity} held · ${fmtHeld(r.heldH)}</span></td><td>${esc(r.sellDecision.label)} · ${esc(r.sellDecision.detail)}</td><td><button class="act" data-today="trades">manage sale</button></td></tr>`;
-    if (item.type === "checklist") return `<tr data-i="${i}"><td><span class="tag">purchase</span></td><td><b>${esc(r.name)}</b>${checklistProgress(r)}</td><td>${riskCell(r)}</td><td><button class="act" data-today="parts">continue checklist</button></td></tr>`;
-    return `<tr data-i="${i}"><td><span class="tag good">next trade</span></td><td><b>${esc(r.name)}</b><span class="sub">${r.kind} · ${r.buyAt}p outlay</span></td><td>${riskCell(r)}</td><td><button class="act" data-today="verify">verify before buying</button></td></tr>`;
+    if (item.type === "exit") return `<tr data-i="${i}"><td><span class="tag warn">position</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.quantity} held · ${fmtHeld(r.heldH)}</span></td><td>${esc(r.sellDecision.label)} · ${esc(r.sellDecision.detail)}</td><td><button class="act" data-today="trades">manage sale</button></td></tr>`;
+    if (item.type === "checklist") {
+      const c = item.checklist;
+      const entries = r.parts?.length ? checklistEntries(r) : Object.keys(c.entries);
+      const done = entries.filter((key) => checklistStatus(c.entries[key]) === "purchased").length;
+      return `<tr data-i="${i}" data-checklist="${esc(c.setItemId)}"><td><span class="tag">purchase</span></td>
+        <td>${marketLink(c.item_slug, c.name)}<span class="sub">${done}/${entries.length} purchases acquired${c.currentRow ? "" : " · no longer ranked"}</span></td>
+        <td>${c.currentRow ? riskCell(c.currentRow) : '<span class="rate none">no longer a current opportunity — finish, assemble, or remove it</span>'}</td>
+        <td>${r.parts?.length ? '<button class="act" data-today="parts">continue checklist</button> ' : ""}<button class="act" data-today="assembled">mark assembled</button> <button class="act" data-today="remove">remove</button></td></tr>`;
+    }
+    return `<tr data-i="${i}"><td><span class="tag good">next trade</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.kind} · ${r.buyAt}p outlay</span></td><td>${riskCell(r)}</td><td><button class="act" data-today="verify">verify before buying</button></td></tr>`;
   }).join("") : '<tr><td colspan="4" class="empty">Nothing needs attention right now.</td></tr>';
 }
 
@@ -1629,6 +1866,20 @@ $("#today").addEventListener("click", async (e) => {
   const item = todayItems[Number(btn.closest("tr").dataset.i)];
   if (btn.dataset.today === "trades") return document.querySelector('nav button[data-tab="trades"]').click();
   if (btn.dataset.today === "parts") return showParts(item.row);
+  if (btn.dataset.today === "assembled" || btn.dataset.today === "remove") {
+    const status = btn.dataset.today === "remove" ? "removed" : "assembled";
+    if (status === "removed") {
+      const answer = await askForm(`Remove the ${item.checklist.name} checklist?`, [
+        { name: "confirm", label: 'Type "remove" to stop tracking these purchases' },
+      ]);
+      if (!answer || answer.confirm.trim().toLowerCase() !== "remove") return;
+    }
+    const ok = await act(btn, () => api(`/api/checklists/${encodeURIComponent(item.checklist.setItemId)}/status`, {
+      method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ status }),
+    }));
+    if (ok) { toast(status === "removed" ? `Removed the ${item.checklist.name} checklist.` : `${item.checklist.name} marked assembled.`); loadToday(); }
+    return;
+  }
   if (btn.dataset.today === "verify" && await verifyRow(item.row, btn)) await loadToday();
 });
 $("#today-refresh").addEventListener("click", loadToday);
@@ -1666,9 +1917,37 @@ $("#watched-only").addEventListener("change", loadOps);
 $("#filter").addEventListener("input", renderOps);
 $("#refresh").addEventListener("click", loadOps);
 
+// ── connection recovery ─────────────────────────────────────────────────────
+// When the daemon restarts, requests fail for a few seconds. Probe until it
+// answers, then clear the stale connection errors and refresh the open view —
+// no page reload needed.
+const tabLoaders = { today: loadToday, ops: loadOps, sets: loadSets, plan: loadPlan, alerts: loadAlerts, log: loadLog, trades: loadTrades, ducats: loadDucats, settings: loadSettings };
+const activeTab = () => document.querySelector('nav button[aria-selected="true"]')?.dataset.tab ?? "today";
+let reconnectProbe = null;
+connection.addEventListener("down", () => {
+  $("#stale").textContent = "⚠ PlatWatch isn't answering — reconnecting automatically…";
+  $("#stale").dataset.connection = "down";
+  reconnectProbe ??= setInterval(() => { api("/api/status").catch(() => {}); }, 3000);
+});
+connection.addEventListener("reconnected", () => {
+  clearInterval(reconnectProbe);
+  reconnectProbe = null;
+  delete $("#stale").dataset.connection;
+  $("#stale").textContent = "";
+  for (const feedback of document.querySelectorAll('.load-feedback[data-error="true"]')) {
+    feedback.hidden = true;
+    feedback.dataset.error = "false";
+  }
+  toast("Reconnected to PlatWatch — refreshing this view.");
+  loadStatus();
+  Promise.resolve(tabLoaders[activeTab()]?.()).catch(() => {});
+});
+
 loadStatus();
-loadSettings().then(()=>{ $("#plan-budget").value=$("#setting-budget").value; $("#plan-cap").value=$("#setting-cap").value; $("#plan-reserve").value=$("#setting-reserve").value; $("#plan-group-cap").value=$("#setting-group-cap").value; $("#plan-conf").value=$("#setting-confidence").value; });
+loadSettings().then(()=>{ $("#plan-budget").value=$("#setting-budget").value; $("#plan-cap").value=$("#setting-cap").value; $("#plan-reserve").value=$("#setting-reserve").value; $("#plan-group-cap").value=$("#setting-group-cap").value; $("#plan-conf").value=$("#setting-confidence").value; }).catch(() => {});
 loadOps();
-loadToday();
+importLegacyChecklists()
+  .catch((err) => toast(`Couldn't move this browser's saved checklists: ${describeError(err)}`, "error"))
+  .finally(() => loadToday());
 setInterval(loadStatus, 30000);
 

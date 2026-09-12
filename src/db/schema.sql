@@ -262,6 +262,12 @@ CREATE TABLE IF NOT EXISTS trade (
   -- calibration table measures and must not move once recorded.
   target_price   INTEGER
   ,buy_wait_h    REAL
+  -- A partial sale is its own closed lot; this points at the purchase it came
+  -- from. Indexed in migrate.ts, which also adds it to older databases.
+  ,parent_trade_id INTEGER
+  -- The live alert that found this purchase (or, for an untracked sale, the
+  -- buy order it filled). Copied onto every lot sold from the position.
+  ,alert_id      INTEGER
 );
 CREATE INDEX IF NOT EXISTS trade_open ON trade(sold_at) WHERE sold_at IS NULL;
 CREATE INDEX IF NOT EXISTS trade_item ON trade(item_id, variant);
@@ -287,6 +293,20 @@ CREATE TABLE IF NOT EXISTS exit_alert (
   value     INTEGER,
   fired_at  TEXT NOT NULL,
   PRIMARY KEY (trade_id, kind)
+);
+
+-- Progress buying a set's parts. `entries_json` maps each purchase (part and
+-- seller order) to its status and what was actually paid; `row_json` keeps the
+-- shopping list as it was, so a half-bought set stays visible after it stops
+-- qualifying as an opportunity. Only 'active' checklists need attention.
+CREATE TABLE IF NOT EXISTS set_checklist (
+  set_item_id TEXT PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+  status      TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','assembled','completed','removed')),
+  entries_json TEXT NOT NULL DEFAULT '{}',
+  row_json    TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
 );
 
 -- Durable Discord delivery. Rows disappear only after Discord accepts them;

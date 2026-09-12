@@ -8,6 +8,7 @@
     "start": "tsx scripts/daemon.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
+    "test:browser": "node --import tsx --test --test-concurrency=1 src/web/ui.e2e.ts",
     "verify:phase1": "tsx scripts/verify-phase1.ts",
     "ingest": "tsx scripts/ingest.ts",
     "verify:phase2": "tsx scripts/verify-phase2.ts",
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.2",
+    "playwright-core": "^1.63.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },

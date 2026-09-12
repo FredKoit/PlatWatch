@@ -51,7 +51,31 @@ refreshed with the watchlist, so the check reads a book minutes old, not hours.
 
 Positions with more than one unit can be sold in parts. Enter the quantity sold;
 PlatWatch records that lot's profit and leaves the remaining units open at their
-original cost and target.
+original cost and target. Each lot remembers the purchase it was sold from, and
+the alert that found it, so alert performance counts every partial sale once.
+
+On **Live alerts**, choosing _bought_ on a "buy it" alert records an open
+position and links it to the alert in one server step. Choosing _sold_ on a "sell
+to them" alert lists your matching open positions: pick one and the quantity
+sold, and the profit comes from what that position really cost. With nothing
+tracked to sell from, _Record untracked sale_ asks for the original cost. Doing
+either again — after an error, or by accident — returns the trade already
+recorded instead of creating a second one. An older outcome saved without a
+trade keeps an _add to trades_ repair button.
+
+Alert references are medians and can be decimal (138.75p). Predictions keep
+their decimals for calibration; suggested listing targets round down to whole
+platinum, and platinum paid and received is always whole.
+
+Repeats of the same item at the same price fold under one row, suspicious
+alerts stay collapsed until asked for, and only an alert still backed by a
+fresh, reachable order is marked **actionable** — the rest say _verify first_.
+Every item name links to its warframe.market page in a new tab, so a listing can
+be confirmed before trading; price history is the _history_ button beside it.
+
+Settings shows whether the running daemon actually has Windows toasts on. The
+scheduled task starts it with `--no-toast`, so they read _disabled_; Discord is
+unaffected.
 
 ## Running it unattended
 
@@ -94,7 +118,8 @@ those by hand, stop the daemon first. Anything that only reads the database
 | `npm run sell -- rhino_prime_set` | What to list something at, and how long it will take                                   |
 | `npm run watch`                   | Live sniper alone                                                                      |
 | `npm run ingest -- sweep`         | A crawl by hand: `catalog`, `details`, `sweep`, `stats`                                |
-| `npm test`                        | 250 tests                                                                              |
+| `npm test`                        | Unit and API tests, each on an in-memory database                                      |
+| `npm run test:browser`            | Clicks through the real UI in headless Chromium, on a temporary database               |
 
 Sweeps are resumable. Interrupt one and `npm run ingest -- sweep --resume`
 continues it rather than starting over.
@@ -169,8 +194,12 @@ sells today ahead of 400p that sits for a week.
 
 Set recommendations reserve the exact seller-order quantities they consume.
 Once a higher-ranked set uses a scarce listing, another set cannot spend the
-same stock again. Its component checklist persists in this browser and tracks
-needed, contacted, purchased, and unavailable orders. Actual paid totals update
+same stock again. Its component checklist is saved in SQLite — so it survives
+another browser, restarts and backups — and tracks needed, contacted, purchased,
+and unavailable orders. A half-bought set stays on Today, with the shopping list
+it was bought from, until you mark it assembled or remove it, even after it
+stops qualifying as an opportunity. Progress older versions kept in the
+browser's localStorage moves into the database the first time the page loads. Actual paid totals update
 the remaining cash requirement and projected margin; unavailable entries can
 refresh every component book to find replacement sellers.
 
@@ -201,7 +230,7 @@ Calibration compares predicted and realised margins only for the same trades
 that have a recorded prediction. Trades without predictions still count in
 total profit, but do not influence the strategy's calibration.
 
-**Price history** opens from any item name: daily traded median with its
+**Price history** opens from the _history_ button beside any item name: daily traded median with its
 low–high range, and volume, with the trade's own prices drawn across it — the
 way to tell an unusual bargain from a market sliding downhill. Rows carry a
 trend tag when last week's price moved 5% or more against the month's.

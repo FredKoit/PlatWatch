@@ -24,6 +24,24 @@ import { backupDatabase, listBackups } from "../db/backup";
 import { exportCsv, type ExportKind } from "./export";
 import { appSettings, saveAppSettings, type AppSettings } from "../config/settings";
 import type { Notice } from "../live/notify";
+import {
+  AlertTradeError,
+  matchingPositions,
+  outcomeConflict,
+  recordAlertPurchase,
+  recordAlertSale,
+  recordAlertUntrackedSale,
+  type AlertTradeResult,
+} from "../trade/alertTrades";
+import {
+  CHECKLIST_STATUSES,
+  importChecklists,
+  listChecklists,
+  normaliseEntries,
+  saveChecklist,
+  setChecklistStatus,
+  type ChecklistStatus,
+} from "../trade/checklists";
 
 /**
  * A local, dependency-free HTTP server.
@@ -61,13 +79,28 @@ const integer = (value: unknown, min: number, max = 1_000_000) => {
 };
 const shortText = (value: unknown, max = 200) =>
   typeof value === "string" && value.trim() && value.length <= max ? value.trim() : null;
+/**
+ * A prediction, which may be decimal: statistics medians give references like
+ * 138.75p and profits like 28.75p. Only platinum actually paid or received has
+ * to be whole, and those still go through `integer`.
+ */
+const finite = (value: unknown, min: number, max = 1_000_000) => {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= min && n <= max ? n : null;
+};
+const optional = <T>(value: unknown, parse: (v: unknown) => T | null): T | undefined | null =>
+  value === undefined || value === null || value === "" ? undefined : parse(value);
+const CHECKLIST_ID = /^\/api\/checklists\/([A-Za-z0-9_-]{1,64})(\/status)?$/;
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > 64_000) throw new Error("request body too large");
+    // A set checklist carries its shopping list, which can run to tens of KB.
+    if (size > 256_000) throw new Error("request body too large");
     chunks.push(chunk as Buffer);
   }
   if (chunks.length === 0) return {};
@@ -233,7 +266,7 @@ export function createApp(db: Db, opts: {
           ...(capital && Number(capital) > 0 ? { maxBuyAt: Number(capital) } : {}),
         });
         json(res, {
-          rows: rows.slice(0, Number(url.searchParams.get("limit") ?? 100)),
+          rows: rows.slice(0, Number(url.searchParams.get("limit") ?? 100)).map((r) => ({ ...r, item_slug: r.slug })),
           total: rows.length,
           plan: budget > 0 ? planSpend(rows, budget) : null,
         });
@@ -241,7 +274,54 @@ export function createApp(db: Db, opts: {
       }
 
       if (req.method === "GET" && path === "/api/alerts") {
-        json(res, recentAlerts(db, Number(url.searchParams.get("limit") ?? 50)));
+        json(res, recentAlerts(db, integer(url.searchParams.get("limit") ?? 200, 1, 2000) ?? 200));
+        return;
+      }
+
+      const alertPositions = req.method === "GET" ? /^\/api\/alerts\/(\d+)\/positions$/.exec(path) : null;
+      if (alertPositions) {
+        json(res, matchingPositions(db, Number(alertPositions[1])));
+        return;
+      }
+
+      // One request records the trade AND links it to the alert, atomically.
+      // Repeating it — a retry after a lost response, a double click — returns
+      // the trade already recorded instead of creating another.
+      const alertTrade = req.method === "POST" ? /^\/api\/alerts\/(\d+)\/trade$/.exec(path) : null;
+      if (alertTrade) {
+        const alertId = Number(alertTrade[1]);
+        const b = await readBody(req);
+        const quantity = integer(b["quantity"] ?? 1, 1, 10_000);
+        let result: AlertTradeResult | null = null;
+        if (b["mode"] === "purchase") {
+          const buyPrice = integer(b["buyPrice"], 0);
+          const targetPrice = optional(b["targetPrice"], (v) => integer(v, 1));
+          const buyWaitH = optional(b["buyWaitH"], (v) => finite(v, 0, 8760));
+          if (quantity !== null && buyPrice !== null && targetPrice !== null && buyWaitH !== null) {
+            result = recordAlertPurchase(db, alertId, {
+              buyPrice, quantity,
+              ...(targetPrice !== undefined ? { targetPrice } : {}),
+              ...(buyWaitH !== undefined ? { buyWaitH } : {}),
+            });
+          }
+        } else if (b["mode"] === "position") {
+          const tradeId = integer(b["tradeId"], 1);
+          const sellPrice = integer(b["sellPrice"], 0);
+          if (quantity !== null && tradeId !== null && sellPrice !== null) {
+            result = recordAlertSale(db, alertId, { tradeId, quantity, sellPrice });
+          }
+        } else if (b["mode"] === "untracked") {
+          const buyPrice = integer(b["buyPrice"], 0);
+          const sellPrice = integer(b["sellPrice"], 0);
+          if (quantity !== null && buyPrice !== null && sellPrice !== null) {
+            result = recordAlertUntrackedSale(db, alertId, { buyPrice, quantity, sellPrice });
+          }
+        }
+        if (!result) {
+          json(res, { error: "mode must be purchase, position, or untracked, with whole-platinum prices and a positive integer quantity" }, 400);
+          return;
+        }
+        json(res, result, result.duplicate ? 200 : 201);
         return;
       }
 
@@ -303,6 +383,8 @@ export function createApp(db: Db, opts: {
       if (alertFeedback) {
         const b=await readBody(req); const outcomes=["bought","already_gone","no_reply","margin_disappeared"];
         if (!outcomes.includes(String(b["outcome"]))) { json(res,{error:"invalid alert outcome"},400); return; }
+        const conflict = outcomeConflict(db, Number(alertFeedback[1]), String(b["outcome"]));
+        if (conflict) { json(res, { error: conflict }, 409); return; }
         const tradeId=b["tradeId"]===undefined?undefined:integer(b["tradeId"],1);
         if (tradeId===null || !setAlertFeedback(db,Number(alertFeedback[1]),b["outcome"] as any,tradeId,typeof b["note"]==="string"?b["note"]:undefined)) {
           json(res,{error:"alert or trade not found"},404); return;
@@ -337,8 +419,8 @@ export function createApp(db: Db, opts: {
         const itemId = shortText(b["itemId"]);
         const quantity = integer(b["quantity"] ?? 1, 1, 10_000);
         const buyPrice = integer(b["buyPrice"], 0);
-        const expectedSell = b["expectedSell"] === undefined ? undefined : integer(b["expectedSell"], 0);
-        const expectedMargin = b["expectedMargin"] === undefined ? undefined : integer(b["expectedMargin"], -1_000_000);
+        const expectedSell = optional(b["expectedSell"], (v) => finite(v, 0));
+        const expectedMargin = optional(b["expectedMargin"], (v) => finite(v, -1_000_000));
         const targetPrice = b["targetPrice"] === undefined || b["targetPrice"] === "" ? undefined : integer(b["targetPrice"], 1);
         const source = b["source"] ?? "manual";
         const buyWaitH = b["buyWaitH"] === undefined || b["buyWaitH"] === "" ? undefined : Number(b["buyWaitH"]);
@@ -423,6 +505,52 @@ export function createApp(db: Db, opts: {
         return;
       }
 
+      if (req.method === "GET" && path === "/api/checklists") {
+        const list = listChecklists(db);
+        // The stored shopping list is the one you were buying from; the current
+        // ranking's row is offered alongside for finding replacement sellers.
+        const current = list.length
+          ? new Map(setArbitrage(db, { includeHeldBack: true, limit: 100_000 }).rows.map((r) => [r.itemId, r]))
+          : new Map();
+        json(res, list.map((c) => ({
+          ...c,
+          row: c.row ?? current.get(c.setItemId) ?? null,
+          currentRow: current.get(c.setItemId) ?? null,
+        })));
+        return;
+      }
+      if (req.method === "POST" && path === "/api/checklists/import") {
+        const b = await readBody(req);
+        const legacy = b["checklists"];
+        if (legacy === null || typeof legacy !== "object" || Array.isArray(legacy)) {
+          json(res, { error: "checklists must be an object keyed by set id" }, 400);
+          return;
+        }
+        json(res, { imported: importChecklists(db, legacy as Record<string, unknown>) });
+        return;
+      }
+      const checklist = path === "/api/checklists/import" ? null : CHECKLIST_ID.exec(path);
+      if (checklist && req.method === "PUT" && !checklist[2]) {
+        const b = await readBody(req);
+        const entries = normaliseEntries(b["entries"]);
+        if (!entries) { json(res, { error: "entries must map purchases to needed, contacted, purchased, or unavailable" }, 400); return; }
+        const saved = saveChecklist(db, checklist[1]!, entries, b["row"] ?? undefined);
+        if (!saved) { json(res, { error: "unknown set" }, 404); return; }
+        json(res, saved);
+        return;
+      }
+      if (checklist && req.method === "PATCH" && checklist[2]) {
+        const b = await readBody(req);
+        const next = b["status"];
+        if (!CHECKLIST_STATUSES.includes(next as ChecklistStatus)) {
+          json(res, { error: `status must be one of ${CHECKLIST_STATUSES.join(", ")}` }, 400);
+          return;
+        }
+        if (!setChecklistStatus(db, checklist[1]!, next as ChecklistStatus)) { json(res, { error: "checklist not found" }, 404); return; }
+        json(res, { ok: true });
+        return;
+      }
+
       if (req.method === "POST" && path === "/api/watch") {
         const b = await readBody(req);
         const itemId = shortText(b["itemId"]);
@@ -437,7 +565,9 @@ export function createApp(db: Db, opts: {
 
       json(res, { error: "not found" }, 404);
     } catch (err) {
-      json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
+      const code = err instanceof AlertTradeError ? err.status
+        : err instanceof RangeError || err instanceof SyntaxError ? 400 : 500;
+      json(res, { error: err instanceof Error ? err.message : String(err) }, code);
     }
   });
 }

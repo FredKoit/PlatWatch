@@ -245,9 +245,24 @@
   .plan-summary .stat em{font-style:normal;font-size:11px;color:var(--ink-3)}
   .plan-skipped{flex-basis:100%;margin:0;padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--ink-3)}
 
-  /* An item name opens its price history. It stays a name, visually. */
-  button.name.link{background:none;border:0;padding:0;font:inherit;font-size:14px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left}
-  button.name.link:hover{color:var(--gold);text-decoration:underline;text-underline-offset:3px}
+  /* An item name opens warframe.market in a new tab, to confirm availability.
+     It stays a name, visually; price history is the small button beside it. */
+  a.name.link{font-size:14px;font-weight:600;color:var(--ink);text-decoration:none}
+  a.name.link:hover,a.name.link:focus-visible{color:var(--gold);text-decoration:underline;text-underline-offset:3px}
+  a.name.link .ext{font-size:10px;color:var(--ink-3);margin-left:3px;font-weight:400}
+  .hist-btn{background:none;border:1px solid var(--line);border-radius:4px;color:var(--ink-3);font:inherit;font-size:10px;padding:0 5px;margin-left:6px;cursor:pointer;vertical-align:1px}
+  .hist-btn:hover{color:var(--gold);border-color:var(--gold)}
+  .modal-intro{font-size:13px;display:grid;gap:4px}
+  dialog select{width:100%}
+  dialog h3 a.name.link{font-size:inherit}
+  .check-actions{display:flex;gap:8px;flex-wrap:wrap}
+  td.muted{color:var(--ink-2);font-size:13px}
+  tr.unverified td.muted{opacity:.85}
+  tr.alert-repeat td{background:#0e161a;color:var(--ink-3)}
+  .group-toggle{margin-left:8px;min-height:22px !important;padding:1px 6px !important}
+  tr.suspicious-toggle td{padding:10px 14px;background:#140f10}
+  #settings-health b[data-state="disabled"]{color:var(--ink-3)}
+  #settings-health b[data-state="failing"]{color:var(--bad)}
   button.linkish{background:none;border:0;padding:0;font:inherit;font-size:11px;color:var(--ink-3);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
   button.linkish:hover{color:var(--gold)}
   .fill{display:flex;align-items:center;gap:8px;white-space:nowrap}

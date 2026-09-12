@@ -105,6 +105,8 @@ export interface MarketRow {
 
 export interface SetPartInput {
   itemId: string;
+  /** warframe.market address of the part. */
+  slug?: string;
   name: string;
   qty: number;
   lowSell: number | null;

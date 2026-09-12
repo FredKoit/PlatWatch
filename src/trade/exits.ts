@@ -1,6 +1,6 @@
 import type { Db } from "../db/index";
 import { bookReader, unitsBelow, type BookOrder } from "../rank/depth";
-import { sellTime } from "../rank/timing";
+import { formatDuration, sellTime } from "../rank/timing";
 import { whisperFor } from "../live/detect";
 import type { Notice } from "../live/notify";
 
@@ -62,7 +62,7 @@ export interface PositionMarket {
   expectedDays: number | null;
 }
 
-const fmtDays = (d: number) => (d < 1 ? `${Math.max(1, Math.round(d * 24))}h` : `${d.toFixed(1)}d`);
+const fmtDays = formatDuration;
 
 export function exitSignals(
   p: Position,

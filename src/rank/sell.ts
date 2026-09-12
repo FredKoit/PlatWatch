@@ -1,6 +1,7 @@
 import type { Db } from "../db/index";
 import { latestSweepId } from "./query";
 import { LIVE_OVERLAY, liveCutoff } from "../live/book";
+import { bookReader, unitsBelow } from "./depth";
 
 /**
  * What to list something at, once you already hold it.
@@ -54,6 +55,42 @@ export interface SellAdvice {
    * the book still leaves you above where anyone buys.
    */
   bookAboveMarket: boolean;
+}
+
+/** The wait at one specific listing price — normally your own target. */
+export interface SaleEstimate {
+  price: number;
+  /** Reachable units listed strictly below `price`; they sell before you. */
+  queue: number;
+  /** Null when nothing trades, or when the price sits above the recent range. */
+  days: number | null;
+  /** The price is above the typical daily high, where the rate says nothing. */
+  aboveRange: boolean;
+  basis: string;
+}
+
+/**
+ * Expected wait at `price`, not at fair value.
+ *
+ * The position view used to quote the fair-price wait next to a higher
+ * target, as though the target would sell as fast. The queue ahead of a
+ * higher price is longer, and above the range it has traded in recently the
+ * daily volume describes other people's cheaper sales, so no estimate is given.
+ */
+export function estimateSale(db: Db, advice: SellAdvice, price: number, now = Date.now()): SaleEstimate {
+  const asks = bookReader(db, now)(advice.itemId, advice.variant, "sell");
+  const queue = unitsBelow(asks, price);
+  const aboveRange = advice.tradedHigh !== null && price > advice.tradedHigh;
+  const days = aboveRange || advice.dailyVolume <= 0 ? null : Number(((queue + 1) / advice.dailyVolume).toFixed(3));
+  const basis = advice.dailyVolume <= 0
+    ? "nothing has traded recently to estimate from"
+    : aboveRange
+      ? `above the ${Math.round(advice.tradedHigh!)}p it typically trades up to — no reliable estimate`
+      : `${queue} listed below ${price}p, about ${advice.dailyVolume} sold a day` +
+        (advice.tradedMedian !== null && price > advice.tradedMedian * 1.1
+          ? `; above the ${Math.round(advice.tradedMedian)}p median, so likely slower`
+          : "");
+  return { price, queue, days, aboveRange, basis };
 }
 
 const median = (xs: number[]): number | null => {

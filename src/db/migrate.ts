@@ -257,6 +257,51 @@ export const MIGRATIONS: Migration[] = [
       ); CREATE INDEX IF NOT EXISTS trade_audit_trade ON trade_audit(trade_id, created_at DESC)`);
     },
   },
+  {
+    version: 12,
+    name: "trade lineage, alert links, persistent set checklists",
+    up(db) {
+      // A partial sale used to become an unrelated closed row: nothing tied it
+      // back to the purchase it came from, or to the alert that found it.
+      addColumn(db, "trade", "parent_trade_id", "INTEGER");
+      addColumn(db, "trade", "alert_id", "INTEGER");
+      if (tableExists(db, "trade")) {
+        // Lots were copied from their position with the same item, variant,
+        // price and bought_at to the millisecond, and always inserted after it.
+        db.exec(`
+          UPDATE trade SET parent_trade_id = (
+            SELECT MIN(p.id) FROM trade p
+             WHERE p.item_id = trade.item_id AND p.variant = trade.variant
+               AND p.bought_at = trade.bought_at AND p.buy_price = trade.buy_price
+               AND p.id < trade.id)
+           WHERE parent_trade_id IS NULL
+        `);
+        if (tableExists(db, "alert_feedback")) {
+          db.exec(`
+            UPDATE trade SET alert_id = (
+              SELECT MIN(af.alert_id) FROM alert_feedback af WHERE af.trade_id = trade.id)
+             WHERE alert_id IS NULL
+          `);
+        }
+        db.exec(`
+          UPDATE trade SET alert_id = (SELECT p.alert_id FROM trade p WHERE p.id = trade.parent_trade_id)
+           WHERE alert_id IS NULL AND parent_trade_id IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS trade_parent ON trade(parent_trade_id);
+          CREATE INDEX IF NOT EXISTS trade_alert ON trade(alert_id);
+        `);
+      }
+      // Set purchase progress lived in one browser's localStorage, so a cleared
+      // cache or another machine lost platinum already spent on parts.
+      db.exec(`CREATE TABLE IF NOT EXISTS set_checklist (
+        set_item_id TEXT PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','assembled','completed','removed')),
+        entries_json TEXT NOT NULL DEFAULT '{}',
+        row_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+    },
+  },
 ];
 
 export interface MigrationResult {

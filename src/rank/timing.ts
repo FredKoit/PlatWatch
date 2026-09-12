@@ -87,6 +87,18 @@ export function sellTime(i: SellTimeInput): SellTime {
 }
 
 /**
+ * A wait as a trader reads it. Short estimates used to print as "0d", which
+ * reads as "no time at all" rather than "about forty minutes".
+ */
+export function formatDuration(days: number | null): string {
+  if (days === null || !Number.isFinite(days)) return "–";
+  const minutes = days * 1440;
+  if (minutes < 60) return `${Math.max(1, Math.round(minutes))}m`;
+  if (minutes < 48 * 60) return `${Math.round(minutes / 60)}h`;
+  return days < 14 ? `${days.toFixed(1)}d` : `${Math.round(days)}d`;
+}
+
+/**
  * The fastest a trade can realistically turn over. Whispering, meeting in game
  * and trading take hours whatever the market does, and without a floor a
  * hundred-a-day item sells "in fifteen minutes" and every per-day figure built

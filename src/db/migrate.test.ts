@@ -164,6 +164,7 @@ test("order depth and seller status arrive as columns, leaving every observation
     "9:durable notification outbox",
     "10:alert outcome feedback",
     "11:trade audit and buy fill timing",
+    "12:trade lineage, alert links, persistent set checklists",
   ]);
   assert.ok(columns(db, "order_seen").includes("quantity"));
   assert.ok(columns(db, "order_seen").includes("user_status"));

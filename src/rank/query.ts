@@ -85,7 +85,7 @@ export function setRows(db: Db, sweepId: number, now = Date.now()): SetInput[] {
     .filter((r): r is MarketRow => (r as MarketRow).lowSell !== null);
 
   const partStmt = db.prepare(
-    `SELECT p.id AS itemId, p.name AS name, ip.qty AS qty,
+    `SELECT p.id AS itemId, p.slug AS slug, p.name AS name, ip.qty AS qty,
             CASE
               WHEN plb.low_sell IS NOT NULL
                AND plb.low_sell_at > @liveCutoff

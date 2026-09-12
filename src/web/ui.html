@@ -83,7 +83,9 @@
     <b>Sells in</b> is how long the platinum stays out — for a spread, your bid filling and then your ask
     selling — with how far the trade history backs it (hover for the numbers). A <span class="tag warn" style="margin-left:0">▼ 30d</span>
     tag means the item trades lower this week than over the month. Once you have closed trades, profit shows
-    what your own record says the strategy really makes. Click a name for its price history; click a header to sort.
+    what your own record says the strategy really makes. An item name opens its warframe.market page in a new tab,
+    to confirm the listing or market is still there before trading; <b>history</b> beside it shows the price history.
+    Click a header to sort.
   </p>
   <div class="wrap"><table id="ops"><thead><tr>
     <th></th>
@@ -127,7 +129,8 @@
     rather than pricing it. The set sells at the cheapest set ask less 1p, but
     <span class="capped">never above where sets actually trade</span>: when sellers ask far more than
     buyers pay, the set is priced at the traded median and the profit shrinks to match.
-    Click a row for its shopping list; copying a whisper logs it. Volume is the slowest part's —
+    Click a row for its shopping list; copying a whisper logs it. Checklist progress is saved in
+    PlatWatch's database, and a half-bought set stays on Today until you mark it assembled or remove it. Volume is the slowest part's —
     you can only assemble as fast as the rarest component sells.
   </p>
   <div class="wrap"><table id="sets"><thead><tr>
@@ -203,7 +206,13 @@
   <p class="hint">
     Fired by the live watcher against /v2/orders/recent, newest first. The trend compares the
     last week's traded price with the last month's: a "bargain" in a falling market may simply
-    be the new price. Click an item's name for its price history.
+    be the new price. Repeats of the same item at the same price fold under one row (×N), and
+    suspicious alerts stay collapsed until you ask to see them. Only an alert whose order is
+    still reachable — and, for a sell, still coverable by a reachable ask — is marked
+    <span class="tag good" style="margin-left:0">actionable</span>; the rest say
+    <span class="tag warn" style="margin-left:0">verify first</span>. Choosing bought or sold
+    records the trade on Trades &amp; P&amp;L in one step, and choosing it again never duplicates it.
+    An item name opens warframe.market in a new tab to confirm availability.
   </p>
   <div class="plan-skipped" id="alert-recommendations" hidden></div>
   <div class="wrap"><table id="alerts"><thead><tr>
@@ -218,7 +227,7 @@
 </section>
 
 <section id="tab-settings" hidden>
-  <div class="metrics" id="settings-health"><span class="stat"><span>Live poll</span><b id="health-poll">–</b></span><span class="stat"><span>Windows</span><b id="health-toast">–</b></span><span class="stat"><span>Discord</span><b id="health-discord">–</b></span></div>
+  <div class="metrics" id="settings-health"><span class="stat"><span>Live poll</span><b id="health-poll">–</b></span><span class="stat"><span>Windows toasts</span><b id="health-toast">–</b></span><span class="stat"><span>Discord</span><b id="health-discord">–</b></span></div>
   <form class="guide" id="settings-form"><div class="bar">
     <label class="field"><span>Discord webhook</span><input type="password" id="setting-webhook" size="48" autocomplete="off" placeholder="https://discord.com/api/webhooks/…"></label>
     <button class="act" type="button" id="test-notification">test notification</button>

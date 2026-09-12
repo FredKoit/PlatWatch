@@ -1,9 +1,21 @@
 export const $ = (s) => document.querySelector(s);
 
+/**
+ * Whether the daemon is answering. Any response — even an error status — means
+ * it is; only a failed fetch means it is not. "down" fires on the first failure,
+ * "reconnected" on the first response after one, so the page can clear stale
+ * connection errors and refresh without a reload.
+ */
+export const connection = Object.assign(new EventTarget(), { down: false });
+
 export async function api(path, opts) {
   let res;
   try { res = await fetch(path, opts); }
-  catch { const err = new Error("no response"); err.status = 0; throw err; }
+  catch {
+    if (!connection.down) { connection.down = true; connection.dispatchEvent(new Event("down")); }
+    const err = new Error("no response"); err.status = 0; throw err;
+  }
+  if (connection.down) { connection.down = false; connection.dispatchEvent(new Event("reconnected")); }
   if (!res.ok) {
     let message = res.statusText;
     try { message = (await res.json()).error || message; } catch {}

@@ -1,6 +1,7 @@
 import type { Db } from "../db/index";
 import { latestSweepId } from "../rank/query";
-import { sellAdvice, type SellAdvice } from "../rank/sell";
+import { estimateSale, sellAdvice, type SaleEstimate, type SellAdvice } from "../rank/sell";
+import { formatDuration } from "../rank/timing";
 import { LIVE_OVERLAY, liveCutoff } from "../live/book";
 import { calibrationFactor, calibrationNote, type StrategyFactor } from "./calibration";
 import { evaluatePositions, type ExitSignal } from "./exits";
@@ -20,8 +21,11 @@ export interface OpenTradeInput {
   quantity?: number;
   buyPrice: number;
   boughtFrom?: string;
+  /** Predictions may be decimal — statistics medians are — and are kept exact. */
   expectedSell?: number;
   expectedMargin?: number;
+  /** The live alert this purchase came from. */
+  alertId?: number;
   /** What you mean to sell at; exit alerts fire against it. Defaults to expectedSell. */
   targetPrice?: number;
   source?: "spread" | "set" | "alert" | "manual";
@@ -40,9 +44,9 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
     .prepare(
       `INSERT INTO trade
          (item_id, variant, quantity, buy_price, bought_at, bought_from,
-          expected_sell, expected_margin, target_price, source, note, buy_wait_h)
+          expected_sell, expected_margin, target_price, source, note, buy_wait_h, alert_id)
        VALUES (@itemId, @variant, @quantity, @buyPrice, @boughtAt, @boughtFrom,
-               @expectedSell, @expectedMargin, @targetPrice, @source, @note, @buyWaitH)`,
+               @expectedSell, @expectedMargin, @targetPrice, @source, @note, @buyWaitH, @alertId)`,
     )
     .run({
       itemId: t.itemId,
@@ -57,10 +61,28 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
       source: t.source ?? "manual",
       note: t.note ?? null,
       buyWaitH: t.buyWaitH ?? null,
+      alertId: t.alertId ?? null,
     });
   const id = Number(info.lastInsertRowid);
   audit(db, id, "opened", null, db.prepare("SELECT * FROM trade WHERE id=?").get(id));
   return id;
+}
+
+/**
+ * A sale of something bought before PlatWatch tracked it: one closed lot with
+ * the cost you give. Without a cost there is no profit to record.
+ */
+export function recordClosedSale(
+  db: Db,
+  t: OpenTradeInput & { sellPrice: number; soldTo?: string },
+): number {
+  return db.transaction(() => {
+    const id = openTrade(db, t);
+    db.prepare("UPDATE trade SET sell_price = ?, sold_at = bought_at, sold_to = ? WHERE id = ?")
+      .run(t.sellPrice, t.soldTo ?? null, id);
+    audit(db, id, "recorded_sale", null, db.prepare("SELECT * FROM trade WHERE id=?").get(id), t.note);
+    return id;
+  })();
 }
 
 /**
@@ -91,17 +113,30 @@ export function closeTrade(
   id: number,
   sell: { sellPrice: number; soldTo?: string; quantity?: number },
 ): boolean {
-  return db.transaction(() => {
+  return sellFromPosition(db, id, sell) !== null;
+}
+
+/**
+ * Sell some or all of an open position. Returns the id of the closed lot —
+ * the position itself when every unit sold — or null when it is not open.
+ */
+export function sellFromPosition(
+  db: Db,
+  id: number,
+  sell: { sellPrice: number; soldTo?: string; quantity?: number },
+): number | null {
+  return db.transaction((): number | null => {
     const row = db.prepare("SELECT * FROM trade WHERE id = ? AND sold_at IS NULL").get(id) as
       | Record<string, unknown>
       | undefined;
-    if (!row) return false;
+    if (!row) return null;
     const held = Number(row["quantity"]);
     const quantity = sell.quantity ?? held;
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > held) {
       throw new RangeError(`quantity must be an integer from 1 to ${held}`);
     }
     const soldAt = new Date().toISOString();
+    let lot = id;
     if (quantity === held) {
       db.prepare(
         `UPDATE trade SET sell_price = ?, sold_at = ?, sold_to = ? WHERE id = ?`,
@@ -109,23 +144,24 @@ export function closeTrade(
     } else {
       // Keep the original row open so its target and exit alerts continue to
       // describe the remaining inventory. The sold portion becomes an exact
-      // closed lot with the same per-unit cost and original prediction.
+      // closed lot with the same per-unit cost and original prediction, and
+      // points back at the purchase and alert it came from.
       db.prepare("UPDATE trade SET quantity = ? WHERE id = ?").run(held - quantity, id);
-      db.prepare(
+      lot = Number(db.prepare(
         `INSERT INTO trade
            (item_id, variant, quantity, buy_price, bought_at, bought_from,
             sell_price, sold_at, sold_to, expected_sell, expected_margin,
-            source, note, target_price, buy_wait_h)
+            source, note, target_price, buy_wait_h, parent_trade_id, alert_id)
          SELECT item_id, variant, @quantity, buy_price, bought_at, bought_from,
                 @sellPrice, @soldAt, @soldTo, expected_sell, expected_margin,
-                source, note, target_price, buy_wait_h
+                source, note, target_price, buy_wait_h, COALESCE(parent_trade_id, id), alert_id
            FROM trade WHERE id = @id`,
-      ).run({ id, quantity, sellPrice: sell.sellPrice, soldAt, soldTo: sell.soldTo ?? null });
+      ).run({ id, quantity, sellPrice: sell.sellPrice, soldAt, soldTo: sell.soldTo ?? null }).lastInsertRowid);
       // Re-evaluate signals against the smaller remaining position.
       db.prepare("DELETE FROM exit_alert WHERE trade_id = ?").run(id);
     }
     audit(db, id, quantity === held ? "closed" : "partial_sale", row, db.prepare("SELECT * FROM trade WHERE id=?").get(id));
-    return true;
+    return lot;
   })();
 }
 
@@ -159,7 +195,14 @@ export function tradeAudit(db: Db, id: number): TradeAuditRow[] {
 export interface TradeRow {
   id: number;
   itemId: string;
+  slug: string;
+  /** warframe.market address, so the UI can link the item page. */
+  item_slug: string;
   name: string;
+  /** For a lot sold from a larger position: the purchase it came from. */
+  parentTradeId: number | null;
+  /** The live alert that found the purchase. */
+  alertId: number | null;
   variant: string;
   quantity: number;
   buyPrice: number;
@@ -191,6 +234,8 @@ export interface TradeRow {
   exits: ExitSignal[];
   /** A single next action distilled from the book, history, and exit signals. */
   sellDecision: SellDecision | null;
+  /** Expected wait at the target itself — never the fair-price wait. */
+  targetEstimate: SaleEstimate | null;
 }
 
 export type SellDecisionKind = "sell_now" | "reprice" | "hold" | "list" | "review";
@@ -205,6 +250,7 @@ export function decideSellAction(
   trade: Pick<TradeRow, "buyPrice" | "targetPrice" | "heldH">,
   advice: SellAdvice | null,
   exits: ExitSignal[],
+  targetEstimate: SaleEstimate | null = null,
 ): SellDecision {
   const bid = exits.find((x) => x.kind === "target_bid");
   if (bid) return { kind: "sell_now", label: "Sell now", detail: bid.detail, price: bid.value };
@@ -242,12 +288,16 @@ export function decideSellAction(
   }
 
   if (trade.targetPrice !== null) {
+    const target = Math.round(trade.targetPrice);
+    const e = targetEstimate;
     return {
       kind: "hold",
       label: "Keep listed",
-      detail: advice?.estimatedDaysAtFair == null
-        ? `Keep the ${trade.targetPrice}p target while the market develops.`
-        : `No action needed; about ${advice.estimatedDaysAtFair}d expected at fair value.`,
+      detail: e === null
+        ? `Keep the ${target}p target while the market develops.`
+        : e.days === null
+          ? `Keep the ${target}p target; ${e.basis}.`
+          : `No action needed; about ${formatDuration(e.days)} expected at your ${target}p target (${e.queue} listed below it).`,
       price: trade.targetPrice,
     };
   }
@@ -263,7 +313,8 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
   const sweepId = latestSweepId(db);
   const rows = db
     .prepare(
-      `SELECT t.id, t.item_id AS itemId, i.name, t.variant, t.quantity,
+      `SELECT t.id, t.item_id AS itemId, i.slug, i.slug AS item_slug, i.name, t.variant, t.quantity,
+              t.parent_trade_id AS parentTradeId, t.alert_id AS alertId,
               t.buy_price AS buyPrice, t.bought_at AS boughtAt,
               t.bought_from AS boughtFrom,
               t.sell_price AS sellPrice, t.sold_at AS soldAt, t.sold_to AS soldTo,
@@ -282,7 +333,7 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
         LIMIT @limit`,
     )
     .all({ sweep: sweepId, limit, liveCutoff: liveCutoff(now) }) as Array<
-      Omit<TradeRow, "profit" | "heldH" | "advice" | "exits" | "sellDecision">
+      Omit<TradeRow, "profit" | "heldH" | "advice" | "exits" | "sellDecision" | "targetEstimate">
     >;
 
   const heldH = (r: { soldAt: string | null; boughtAt: string }) =>
@@ -307,14 +358,16 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
     const hours = Number(heldH(r).toFixed(1));
     const advice = r.soldAt === null ? sellAdvice(db, r.itemId, r.variant) : null;
     const signals = exits.get(r.id) ?? [];
+    const targetEstimate = advice && r.targetPrice !== null ? estimateSale(db, advice, r.targetPrice, now) : null;
     return {
       ...r,
       profit: r.sellPrice === null ? null : (r.sellPrice - r.buyPrice) * r.quantity,
       heldH: hours,
       advice,
       exits: signals,
+      targetEstimate,
       sellDecision: r.soldAt === null
-        ? decideSellAction({ buyPrice: r.buyPrice, targetPrice: r.targetPrice, heldH: hours }, advice, signals)
+        ? decideSellAction({ buyPrice: r.buyPrice, targetPrice: r.targetPrice, heldH: hours }, advice, signals, targetEstimate)
         : null,
     };
   });
@@ -345,6 +398,11 @@ export interface Calibration {
 
 interface ClosedTrade {
   source: string;
+  /**
+   * The purchase this lot was sold from. Lots sharing one are one prediction
+   * sold in parts, and count as a single sample. Absent: the lot stands alone.
+   */
+  rootId?: number;
   quantity: number;
   buyPrice: number;
   sellPrice: number;
@@ -359,13 +417,28 @@ interface ClosedTrade {
 export function calibrate(closed: ClosedTrade[]): Calibration[] {
   const sources = [...new Set(closed.map((t) => t.source))];
   return sources.map((source) => {
-    const group = closed.filter((t) => t.source === source);
+    // One sample per purchase: a position sold in three lots is one prediction
+    // and must not weigh three times. Its realised margin is per unit across
+    // every lot sold so far.
+    const byPurchase = new Map<string, ClosedTrade[]>();
+    closed.filter((t) => t.source === source).forEach((t, i) => {
+      const key = t.rootId === undefined ? `lot:${i}` : `root:${t.rootId}`;
+      byPurchase.set(key, [...(byPurchase.get(key) ?? []), t]);
+    });
+    const group = [...byPurchase.values()].map((lots) => {
+      const units = lots.reduce((n, t) => n + t.quantity, 0);
+      return {
+        expectedMargin: lots[0]!.expectedMargin,
+        realised: lots.reduce((n, t) => n + (t.sellPrice - t.buyPrice) * t.quantity, 0) / units,
+        exact: lots.some((t) => t.expectedSell !== null && t.sellPrice === t.expectedSell),
+      };
+    });
     const comparable = group.filter((t) => t.expectedMargin !== null);
     // Per unit, so a five-unit trade does not outweigh a single one.
     // Both means must describe the same trades. Unpredicted wins/losses belong
     // in total P&L, but cannot measure how accurate a prediction was.
     const expected = mean(comparable.map((t) => t.expectedMargin!));
-    const actual = mean(comparable.map((t) => t.sellPrice - t.buyPrice));
+    const actual = mean(comparable.map((t) => t.realised));
     const ratio =
       expected !== null && actual !== null && expected !== 0 ? actual / expected : null;
     // Only trades that carried a prediction can say anything about one.
@@ -374,9 +447,7 @@ export function calibrate(closed: ClosedTrade[]): Calibration[] {
     return {
       source,
       closed: group.length,
-      exactMatches: group.filter(
-        (t) => t.expectedSell !== null && t.sellPrice === t.expectedSell,
-      ).length,
+      exactMatches: group.filter((t) => t.exact).length,
       expected,
       actual,
       ratio,
@@ -390,7 +461,8 @@ export function calibrate(closed: ClosedTrade[]): Calibration[] {
 export function strategyCalibration(db: Db): Map<string, StrategyFactor> {
   const closed = db
     .prepare(
-      `SELECT source, quantity, buy_price AS buyPrice, sell_price AS sellPrice,
+      `SELECT source, COALESCE(parent_trade_id, id) AS rootId, quantity,
+              buy_price AS buyPrice, sell_price AS sellPrice,
               expected_sell AS expectedSell, expected_margin AS expectedMargin
          FROM trade WHERE sold_at IS NOT NULL AND sell_price IS NOT NULL`,
     )
@@ -424,6 +496,8 @@ export interface Pnl {
   medianHoldH: number | null;
   averageBuyWaitH: number | null;
   buyWaitSamples: number;
+  /** Distinct purchases; lots sold from one position count once. */
+  purchases: number;
   bySource: Calibration[];
 }
 
@@ -448,6 +522,7 @@ export function pnl(db: Db): Pnl {
   const trades = listTrades(db, 10_000);
   const closed = trades.filter((t) => t.profit !== null);
   const open = trades.filter((t) => t.profit === null);
+  const purchases = trades.filter((t) => t.parentTradeId === null);
 
   const realised = closed.reduce((sum, t) => sum + t.profit!, 0);
   const wins = closed.filter((t) => t.profit! > 0).length;
@@ -476,6 +551,7 @@ export function pnl(db: Db): Pnl {
   const bySource = calibrate(
     closed.map((t) => ({
       source: t.source,
+      rootId: t.parentTradeId ?? t.id,
       quantity: t.quantity,
       buyPrice: t.buyPrice,
       sellPrice: t.sellPrice!,
@@ -501,8 +577,10 @@ export function pnl(db: Db): Pnl {
     averageHoldH: mean(closed.map((t) => t.heldH)),
     capitalReturn: closedCost > 0 ? realised / closedCost : null,
     medianHoldH: median(closed.map((t) => t.heldH)),
-    averageBuyWaitH: mean(trades.flatMap((t) => t.buyWaitH === null ? [] : [t.buyWaitH])),
-    buyWaitSamples: trades.filter((t) => t.buyWaitH !== null).length,
+    // Lots copy their purchase's fill time; only the purchase itself is a sample.
+    averageBuyWaitH: mean(purchases.flatMap((t) => t.buyWaitH === null ? [] : [t.buyWaitH])),
+    buyWaitSamples: purchases.filter((t) => t.buyWaitH !== null).length,
+    purchases: purchases.length,
     bySource,
   };
 }

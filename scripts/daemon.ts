@@ -112,9 +112,14 @@ function trackedSink(sink: Sink): Sink {
 const sinks: Sink[] = [consoleSink];
 // Toasts are the channel that works unattended. Run from Task Scheduler the
 // console is a log file, so without this every alert went unseen.
-if (process.platform === "win32" && !has("no-toast")) {
+const toastEnabled = process.platform === "win32" && !has("no-toast");
+if (toastEnabled) {
   sinks.push(trackedSink(toastSink({ url: `http://127.0.0.1:${port}` })));
 }
+// What Settings reports: the decision this process made, not a guess.
+setMeta(db, "notify:toast:enabled", toastEnabled ? "1" : "0");
+setMeta(db, "notify:toast:detail", toastEnabled ? "Windows toast notifications are on"
+  : has("no-toast") ? "disabled by --no-toast" : "Windows only");
 const discordNow = () => {
   const webhook = appSettings(db).discordWebhook || process.env["PLATWATCH_DISCORD_WEBHOOK_URL"];
   setMeta(db, "notify:discord:configured", webhook ? "1" : "0");

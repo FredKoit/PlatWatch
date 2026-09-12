@@ -4,6 +4,7 @@ import { openDb, type Db } from "../db/index";
 import { upsertCatalog } from "../db/repo";
 import { closeTrade, correctTrade, decideSellAction, listTrades, openTrade, pnl, strategyCalibration, tradeAudit } from "./journal";
 import type { SellAdvice } from "../rank/sell";
+import { formatDuration } from "../rank/timing";
 import type { WfmItemSummary } from "../wfm/types";
 
 const item = (id: string, slug: string): WfmItemSummary => ({
@@ -169,6 +170,29 @@ test("sell manager recommends freeing stale capital", () => {
   );
   assert.equal(action.kind, "review");
   assert.equal(action.price, 69);
+});
+
+test("holding guidance quotes the wait at your own target, never the fair-price wait", () => {
+  const quick = decideSellAction(
+    { buyPrice: 45, targetPrice: 65, heldH: 2 }, advice({ estimatedDaysAtFair: 0.2 }), [],
+    { price: 65, queue: 1, days: 0.02, aboveRange: false, basis: "" },
+  );
+  assert.match(quick.detail, /about 29m expected at your 65p target \(1 listed below it\)/);
+  assert.doesNotMatch(quick.detail, /0d|fair value/);
+
+  const high = decideSellAction(
+    { buyPrice: 45, targetPrice: 95, heldH: 2 }, advice(), [],
+    { price: 95, queue: 4, days: null, aboveRange: true, basis: "above the 80p it typically trades up to — no reliable estimate" },
+  );
+  assert.match(high.detail, /Keep the 95p target; above the 80p/);
+});
+
+test("short waits read in minutes and hours, not 0d", () => {
+  assert.equal(formatDuration(0.01), "14m");
+  assert.equal(formatDuration(0.3), "7h");
+  assert.equal(formatDuration(1.9), "46h");
+  assert.equal(formatDuration(5), "5.0d");
+  assert.equal(formatDuration(null), "–");
 });
 
 test("a partial sale realises only those units and leaves the rest open", () => {
