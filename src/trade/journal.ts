@@ -26,6 +26,13 @@ export interface OpenTradeInput {
   targetPrice?: number;
   source?: "spread" | "set" | "alert" | "manual";
   note?: string;
+  /** Hours between posting a buy order and it filling. */
+  buyWaitH?: number;
+}
+
+function audit(db: Db, tradeId: number, action: string, before: unknown, after: unknown, note?: string): void {
+  db.prepare("INSERT INTO trade_audit(trade_id,action,before_json,after_json,note,created_at) VALUES(?,?,?,?,?,?)")
+    .run(tradeId, action, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), note ?? null, new Date().toISOString());
 }
 
 export function openTrade(db: Db, t: OpenTradeInput): number {
@@ -33,9 +40,9 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
     .prepare(
       `INSERT INTO trade
          (item_id, variant, quantity, buy_price, bought_at, bought_from,
-          expected_sell, expected_margin, target_price, source, note)
+          expected_sell, expected_margin, target_price, source, note, buy_wait_h)
        VALUES (@itemId, @variant, @quantity, @buyPrice, @boughtAt, @boughtFrom,
-               @expectedSell, @expectedMargin, @targetPrice, @source, @note)`,
+               @expectedSell, @expectedMargin, @targetPrice, @source, @note, @buyWaitH)`,
     )
     .run({
       itemId: t.itemId,
@@ -49,8 +56,11 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
       targetPrice: t.targetPrice ?? null,
       source: t.source ?? "manual",
       note: t.note ?? null,
+      buyWaitH: t.buyWaitH ?? null,
     });
-  return Number(info.lastInsertRowid);
+  const id = Number(info.lastInsertRowid);
+  audit(db, id, "opened", null, db.prepare("SELECT * FROM trade WHERE id=?").get(id));
+  return id;
 }
 
 /**
@@ -64,11 +74,13 @@ export function openTrade(db: Db, t: OpenTradeInput): number {
  */
 export function setTradeTarget(db: Db, id: number, targetPrice: number): boolean {
   return db.transaction(() => {
+    const before = db.prepare("SELECT * FROM trade WHERE id=?").get(id);
     const changed = db
       .prepare("UPDATE trade SET target_price = ? WHERE id = ? AND sold_at IS NULL")
       .run(targetPrice, id).changes;
     if (changed) {
       db.prepare("DELETE FROM exit_alert WHERE trade_id = ? AND kind IN ('target_bid','undercut')").run(id);
+      audit(db, id, "target_changed", before, db.prepare("SELECT * FROM trade WHERE id=?").get(id));
     }
     return changed > 0;
   })();
@@ -77,24 +89,71 @@ export function setTradeTarget(db: Db, id: number, targetPrice: number): boolean
 export function closeTrade(
   db: Db,
   id: number,
-  sell: { sellPrice: number; soldTo?: string },
-): void {
-  db.prepare(
-    `UPDATE trade
-        SET sell_price = @sellPrice,
-            sold_at    = @soldAt,
-            sold_to    = @soldTo
-      WHERE id = @id AND sold_at IS NULL`,
-  ).run({
-    id,
-    sellPrice: sell.sellPrice,
-    soldAt: new Date().toISOString(),
-    soldTo: sell.soldTo ?? null,
-  });
+  sell: { sellPrice: number; soldTo?: string; quantity?: number },
+): boolean {
+  return db.transaction(() => {
+    const row = db.prepare("SELECT * FROM trade WHERE id = ? AND sold_at IS NULL").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return false;
+    const held = Number(row["quantity"]);
+    const quantity = sell.quantity ?? held;
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > held) {
+      throw new RangeError(`quantity must be an integer from 1 to ${held}`);
+    }
+    const soldAt = new Date().toISOString();
+    if (quantity === held) {
+      db.prepare(
+        `UPDATE trade SET sell_price = ?, sold_at = ?, sold_to = ? WHERE id = ?`,
+      ).run(sell.sellPrice, soldAt, sell.soldTo ?? null, id);
+    } else {
+      // Keep the original row open so its target and exit alerts continue to
+      // describe the remaining inventory. The sold portion becomes an exact
+      // closed lot with the same per-unit cost and original prediction.
+      db.prepare("UPDATE trade SET quantity = ? WHERE id = ?").run(held - quantity, id);
+      db.prepare(
+        `INSERT INTO trade
+           (item_id, variant, quantity, buy_price, bought_at, bought_from,
+            sell_price, sold_at, sold_to, expected_sell, expected_margin,
+            source, note, target_price, buy_wait_h)
+         SELECT item_id, variant, @quantity, buy_price, bought_at, bought_from,
+                @sellPrice, @soldAt, @soldTo, expected_sell, expected_margin,
+                source, note, target_price, buy_wait_h
+           FROM trade WHERE id = @id`,
+      ).run({ id, quantity, sellPrice: sell.sellPrice, soldAt, soldTo: sell.soldTo ?? null });
+      // Re-evaluate signals against the smaller remaining position.
+      db.prepare("DELETE FROM exit_alert WHERE trade_id = ?").run(id);
+    }
+    audit(db, id, quantity === held ? "closed" : "partial_sale", row, db.prepare("SELECT * FROM trade WHERE id=?").get(id));
+    return true;
+  })();
 }
 
-export function deleteTrade(db: Db, id: number): void {
-  db.prepare("DELETE FROM trade WHERE id = ?").run(id);
+export function deleteTrade(db: Db, id: number): boolean {
+  const before = db.prepare("SELECT * FROM trade WHERE id=?").get(id);
+  if (!before) return false;
+  audit(db, id, "deleted", before, null);
+  return db.prepare("DELETE FROM trade WHERE id = ?").run(id).changes > 0;
+}
+
+export function correctTrade(db: Db, id: number, values: { quantity: number; buyPrice: number; note?: string }): boolean {
+  return db.transaction(() => {
+    const before = db.prepare("SELECT * FROM trade WHERE id=?").get(id);
+    if (!before) return false;
+    db.prepare("UPDATE trade SET quantity=?, buy_price=?, note=? WHERE id=?")
+      .run(values.quantity, values.buyPrice, values.note ?? null, id);
+    audit(db,id,"corrected",before,db.prepare("SELECT * FROM trade WHERE id=?").get(id),values.note);
+    return true;
+  })();
+}
+
+export interface TradeAuditRow {
+  id: number; tradeId: number; action: string; beforeJson: string | null;
+  afterJson: string | null; note: string | null; createdAt: string;
+}
+
+export function tradeAudit(db: Db, id: number): TradeAuditRow[] {
+  return db.prepare("SELECT id,trade_id AS tradeId,action,before_json AS beforeJson,after_json AS afterJson,note,created_at AS createdAt FROM trade_audit WHERE trade_id=? ORDER BY id DESC").all(id) as TradeAuditRow[];
 }
 
 export interface TradeRow {
@@ -113,6 +172,7 @@ export interface TradeRow {
   expectedMargin: number | null;
   source: string;
   note: string | null;
+  buyWaitH: number | null;
   /** Realised for closed trades; null while open. */
   profit: number | null;
   /** Current market ask for an open position — an unrealised mark, not a quote. */
@@ -129,6 +189,74 @@ export interface TradeRow {
   targetPrice: number | null;
   /** Exit signals for an open position; empty once closed. */
   exits: ExitSignal[];
+  /** A single next action distilled from the book, history, and exit signals. */
+  sellDecision: SellDecision | null;
+}
+
+export type SellDecisionKind = "sell_now" | "reprice" | "hold" | "list" | "review";
+export interface SellDecision {
+  kind: SellDecisionKind;
+  label: string;
+  detail: string;
+  price: number | null;
+}
+
+export function decideSellAction(
+  trade: Pick<TradeRow, "buyPrice" | "targetPrice" | "heldH">,
+  advice: SellAdvice | null,
+  exits: ExitSignal[],
+): SellDecision {
+  const bid = exits.find((x) => x.kind === "target_bid");
+  if (bid) return { kind: "sell_now", label: "Sell now", detail: bid.detail, price: bid.value };
+
+  const stale = exits.find((x) => x.kind === "stale");
+  if (stale) {
+    return {
+      kind: "review",
+      label: "Free the platinum",
+      detail: advice?.quickPrice != null
+        ? `${stale.detail}. Reprice to ${advice.quickPrice}p for a quicker exit.`
+        : stale.detail,
+      price: advice?.quickPrice ?? null,
+    };
+  }
+
+  const undercut = exits.find((x) => x.kind === "undercut");
+  if (undercut && advice) {
+    const abnormal = advice.tradedLow !== null && advice.quickPrice !== null &&
+      advice.quickPrice < advice.tradedLow * 0.9;
+    if (abnormal) {
+      return {
+        kind: "hold",
+        label: "Hold price",
+        detail: `The cheapest ask is well below the recent trading range (${Math.round(advice.tradedLow!)}p typical low); avoid chasing it yet.`,
+        price: trade.targetPrice,
+      };
+    }
+    return {
+      kind: "reprice",
+      label: "Reprice",
+      detail: `${undercut.detail}. Move to ${advice.quickPrice ?? advice.fairPrice}p to regain visibility.`,
+      price: advice.quickPrice ?? advice.fairPrice,
+    };
+  }
+
+  if (trade.targetPrice !== null) {
+    return {
+      kind: "hold",
+      label: "Keep listed",
+      detail: advice?.estimatedDaysAtFair == null
+        ? `Keep the ${trade.targetPrice}p target while the market develops.`
+        : `No action needed; about ${advice.estimatedDaysAtFair}d expected at fair value.`,
+      price: trade.targetPrice,
+    };
+  }
+  return {
+    kind: "list",
+    label: "List it",
+    detail: advice?.fairPrice == null ? "Set a target when current pricing becomes available." : `List around ${advice.fairPrice}p based on the live book and completed trades.`,
+    price: advice?.fairPrice ?? null,
+  };
 }
 
 export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
@@ -141,7 +269,7 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
               t.sell_price AS sellPrice, t.sold_at AS soldAt, t.sold_to AS soldTo,
               t.expected_sell AS expectedSell, t.expected_margin AS expectedMargin,
               COALESCE(t.target_price, t.expected_sell) AS targetPrice,
-              t.source, t.note,
+              t.source, t.note, t.buy_wait_h AS buyWaitH,
               -- Live overlay: what a watchlist refresh or the feed saw since the
               -- sweep. Without it, starring an open position changed nothing here.
               ${LIVE_OVERLAY.lowSell} AS marketNow
@@ -154,7 +282,7 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
         LIMIT @limit`,
     )
     .all({ sweep: sweepId, limit, liveCutoff: liveCutoff(now) }) as Array<
-      Omit<TradeRow, "profit" | "heldH" | "advice" | "exits">
+      Omit<TradeRow, "profit" | "heldH" | "advice" | "exits" | "sellDecision">
     >;
 
   const heldH = (r: { soldAt: string | null; boughtAt: string }) =>
@@ -175,13 +303,21 @@ export function listTrades(db: Db, limit = 100, now = Date.now()): TradeRow[] {
     now,
   );
 
-  return rows.map((r) => ({
-    ...r,
-    profit: r.sellPrice === null ? null : (r.sellPrice - r.buyPrice) * r.quantity,
-    heldH: Number(heldH(r).toFixed(1)),
-    advice: r.soldAt === null ? sellAdvice(db, r.itemId, r.variant) : null,
-    exits: exits.get(r.id) ?? [],
-  }));
+  return rows.map((r) => {
+    const hours = Number(heldH(r).toFixed(1));
+    const advice = r.soldAt === null ? sellAdvice(db, r.itemId, r.variant) : null;
+    const signals = exits.get(r.id) ?? [];
+    return {
+      ...r,
+      profit: r.sellPrice === null ? null : (r.sellPrice - r.buyPrice) * r.quantity,
+      heldH: hours,
+      advice,
+      exits: signals,
+      sellDecision: r.soldAt === null
+        ? decideSellAction({ buyPrice: r.buyPrice, targetPrice: r.targetPrice, heldH: hours }, advice, signals)
+        : null,
+    };
+  });
 }
 
 export interface Calibration {
@@ -198,7 +334,7 @@ export interface Calibration {
   exactMatches: number;
   /** Mean margin the tool predicted per unit. */
   expected: number | null;
-  /** Mean margin actually realised per unit. */
+  /** Mean realised margin per unit, using only trades with a predicted margin. */
   actual: number | null;
   /** actual / expected. Below 1 means the tool is optimistic. */
   ratio: number | null;
@@ -224,15 +360,16 @@ export function calibrate(closed: ClosedTrade[]): Calibration[] {
   const sources = [...new Set(closed.map((t) => t.source))];
   return sources.map((source) => {
     const group = closed.filter((t) => t.source === source);
+    const comparable = group.filter((t) => t.expectedMargin !== null);
     // Per unit, so a five-unit trade does not outweigh a single one.
-    const expected = mean(
-      group.filter((t) => t.expectedMargin !== null).map((t) => t.expectedMargin!),
-    );
-    const actual = mean(group.map((t) => t.sellPrice - t.buyPrice));
+    // Both means must describe the same trades. Unpredicted wins/losses belong
+    // in total P&L, but cannot measure how accurate a prediction was.
+    const expected = mean(comparable.map((t) => t.expectedMargin!));
+    const actual = mean(comparable.map((t) => t.sellPrice - t.buyPrice));
     const ratio =
       expected !== null && actual !== null && expected !== 0 ? actual / expected : null;
     // Only trades that carried a prediction can say anything about one.
-    const measured = group.filter((t) => t.expectedMargin !== null).length;
+    const measured = comparable.length;
     const factor = calibrationFactor(measured, ratio);
     return {
       source,
@@ -274,7 +411,19 @@ export interface Pnl {
   openCount: number;
   /** Marked against the latest sweep. Unrealised and unreliable, by nature. */
   openMarkToMarket: number | null;
+  /** Gross platinum value of open inventory at the current ask. */
+  openMarketValue: number | null;
+  /** Profit if all positions sell at their current target. */
+  expectedOpenProfit: number | null;
+  /** Capital in positions currently flagged as stale. */
+  staleCost: number;
+  realised7d: number;
+  realised30d: number;
+  averageHoldH: number | null;
+  capitalReturn: number | null;
   medianHoldH: number | null;
+  averageBuyWaitH: number | null;
+  buyWaitSamples: number;
   bySource: Calibration[];
 }
 
@@ -309,6 +458,20 @@ export function pnl(db: Db): Pnl {
   const openMark = marks.length
     ? marks.reduce((sum, t) => sum + (t.marketNow! - t.buyPrice) * t.quantity, 0)
     : null;
+  const openMarketValue = marks.length
+    ? marks.reduce((sum, t) => sum + t.marketNow! * t.quantity, 0)
+    : null;
+  const targeted = open.filter((t) => t.targetPrice !== null);
+  const expectedOpenProfit = targeted.length
+    ? targeted.reduce((sum, t) => sum + (t.targetPrice! - t.buyPrice) * t.quantity, 0)
+    : null;
+  const staleCost = open
+    .filter((t) => t.exits.some((x) => x.kind === "stale"))
+    .reduce((sum, t) => sum + t.buyPrice * t.quantity, 0);
+  const soldSince = (days: number) => closed
+    .filter((t) => t.soldAt !== null && Date.parse(t.soldAt) >= Date.now() - days * 86_400_000)
+    .reduce((sum, t) => sum + t.profit!, 0);
+  const closedCost = closed.reduce((sum, t) => sum + t.buyPrice * t.quantity, 0);
 
   const bySource = calibrate(
     closed.map((t) => ({
@@ -330,7 +493,16 @@ export function pnl(db: Db): Pnl {
     openCost,
     openCount: open.length,
     openMarkToMarket: openMark,
+    openMarketValue,
+    expectedOpenProfit,
+    staleCost,
+    realised7d: soldSince(7),
+    realised30d: soldSince(30),
+    averageHoldH: mean(closed.map((t) => t.heldH)),
+    capitalReturn: closedCost > 0 ? realised / closedCost : null,
     medianHoldH: median(closed.map((t) => t.heldH)),
+    averageBuyWaitH: mean(trades.flatMap((t) => t.buyWaitH === null ? [] : [t.buyWaitH])),
+    buyWaitSamples: trades.filter((t) => t.buyWaitH !== null).length,
     bySource,
   };
 }

@@ -73,7 +73,50 @@ test("return per day puts the quick small trade ahead of the slow big one", () =
   assert.equal(bySpeed.picks[0]!.itemId, "quick");
 });
 
+test("profit per contact favours a practical trade over a seller-heavy one", () => {
+  const easy = c("easy", 60, 18, { contacts: 1 });
+  const tedious = c("tedious", 60, 30, { contacts: 3 });
+  const p = planTrades([tedious, easy], opts({ budget: 200, sortBy: "effort" }));
+  assert.equal(p.picks[0]!.itemId, "easy");
+});
+
 test("a trade your record says loses money is never planned", () => {
   const p = planTrades([c("loser", 50, -5)], opts());
   assert.equal(p.picks.length, 0);
+});
+
+test("two set picks cannot both reserve the same scarce seller stock", () => {
+  const shared = { resources: { "order-one": 1 } };
+  const p = planTrades(
+    [c("set-a", 50, 30, shared), c("set-b", 50, 20, shared), c("other", 40, 10)],
+    opts({ budget: 200, resourceCapacity: new Map([["order-one", 1]]) }),
+  );
+  assert.deepEqual(p.picks.map((x) => x.itemId), ["set-a", "other"]);
+  assert.equal(p.skipped.sharedStock, 1);
+});
+
+test("shared stock can support several picks when the order has enough units", () => {
+  const p = planTrades(
+    [c("set-a", 50, 30, { resources: { shared: 1 } }),
+     c("set-b", 50, 20, { resources: { shared: 2 } })],
+    opts({ budget: 200, resourceCapacity: new Map([["shared", 3]]) }),
+  );
+  assert.equal(p.picks.length, 2);
+});
+
+test("cash reserve remains uncommitted", () => {
+  const p = planTrades([c("a", 100, 30), c("b", 80, 20)], opts({ budget: 200, cashReserve: 50 }));
+  assert.deepEqual(p.picks.map((x) => x.itemId), ["a"]);
+  assert.equal(p.deployableBudget, 150);
+  assert.equal(p.cashReserve, 50);
+});
+
+test("a category limit prevents a concentrated plan", () => {
+  const p = planTrades([
+    { ...c("a", 50, 30), group: "warframe" },
+    { ...c("b", 50, 20), group: "warframe" },
+    { ...c("c", 50, 10), group: "weapon" },
+  ], opts({ budget: 200, maxPerGroup: 1 }));
+  assert.deepEqual(p.picks.map((x) => x.itemId), ["a", "c"]);
+  assert.equal(p.skipped.concentrated, 1);
 });

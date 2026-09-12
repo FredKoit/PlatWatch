@@ -48,9 +48,10 @@ const order = (
 test("a sell well under fair value fires, with a pasteable whisper", () => {
   const a = detect(order(), baseline(), DEFAULT_ALERT_POLICY, NOW)!;
   assert.equal(a.kind, "underpriced_sell");
-  // Asks median 66, traded median 64 — priced off the lower, safer of the two.
-  assert.equal(a.reference, 64);
-  assert.equal(a.profit, 24);
+  // Worth the lower of the asks median (66) and the traded median (64) — but a
+  // seller already asks 60, so the resale has to be 59. This used to claim 24.
+  assert.equal(a.reference, 59);
+  assert.equal(a.profit, 19);
   assert.equal(
     a.whisper,
     '/w Tenno123 Hi! I want to buy: "Rhino Prime Set" for 40 platinum. (warframe.market)',
@@ -115,8 +116,8 @@ test("an item whose history stopped is skipped", () => {
 test("an absurd discount fires but is flagged suspicious", () => {
   // 5p against a 66p median: more often a typo or bait than a bargain.
   const a = detect(order({ platinum: 5 }), baseline(), DEFAULT_ALERT_POLICY, NOW)!;
-  assert.equal(a.suspicious, true, "worth seeing, worth doubting");
-  assert.equal(a.profit, 59, "5p against the 64p traded median");
+  assert.equal(a.suspicious, true, "worth seeing, worth doubting — judged against its 64p worth");
+  assert.equal(a.profit, 54, "5p, resold under the 60p already listed");
 });
 
 test("an invisible order is skipped", () => {
@@ -160,7 +161,7 @@ test("a matching variant still alerts normally", () => {
   const sameVariant = order({ platinum: 10, rank: 0 });
   const a = detect(sameVariant, b, { ...DEFAULT_ALERT_POLICY, minProfit: 5 }, NOW)!;
   assert.equal(a.variant, "r0");
-  assert.equal(a.profit, 14);
+  assert.equal(a.profit, 9, "worth 24p, but a 20p ask means reselling at 19p");
 });
 
 test("relic subtypes are separate markets", () => {
@@ -247,16 +248,48 @@ test("a genuinely cheap listing still fires, priced off trades", () => {
   assert.equal(a.suspicious, true, "and the detached book is itself a warning");
 });
 
-test("a healthy book uses the lower of the two, conservatively", () => {
-  const healthy = baseline({ fairValue: 66, median7d: 62 });
+test("a healthy book uses the lowest of worth and the cheapest ask, conservatively", () => {
+  const healthy = baseline({ fairValue: 66, median7d: 62, lowSell: null });
   const a = detect(order({ platinum: 40 }), healthy, DEFAULT_ALERT_POLICY, NOW)!;
-  assert.equal(a.reference, 62, "the traded median is the safer of the two");
+  assert.equal(a.reference, 62, "the traded median is the safer of the two medians");
   assert.equal(a.profit, 22);
   assert.equal(a.suspicious, false);
 });
 
 test("with no trade history the ask median is all there is", () => {
-  const b = baseline({ fairValue: 66, median7d: null });
+  const b = baseline({ fairValue: 66, median7d: null, lowSell: null });
   const a = detect(order({ platinum: 40 }), b, DEFAULT_ALERT_POLICY, NOW)!;
   assert.equal(a.reference, 66);
+});
+
+test("a listing under the median is no bargain when someone already asks less", () => {
+  // Volt Prime Neuroptics BP, from the real alert log: fired at 35p "under a
+  // 45p median" while a 15p ask sat on the book. Buying it loses 20p.
+  const volt = baseline({ name: "Volt Prime Neuroptics Blueprint", fairValue: 45, median7d: 45, lowSell: 15 });
+  assert.equal(detect(order({ platinum: 35 }), volt, DEFAULT_ALERT_POLICY, NOW), null);
+});
+
+test("a listing at the cheapest ask is no bargain either", () => {
+  assert.equal(detect(order({ platinum: 40 }), baseline(), DEFAULT_ALERT_POLICY, NOW, 40), null);
+});
+
+test("an edge that only exists against the median is not reported", () => {
+  // Worth 64p, listed at 40p, but a 48p seller caps the resale at 47p: 7p is
+  // under the 10p floor, so the "24p find" never fires.
+  assert.equal(detect(order({ platinum: 40 }), baseline(), DEFAULT_ALERT_POLICY, NOW, 48), null);
+});
+
+test("the caller's competing ask replaces the baseline's", () => {
+  // The watcher passes the book as it stood before the batch: the baseline it
+  // reloads afterwards may list this very order as the cheapest ask.
+  const b = baseline({ lowSell: 40 });
+  assert.equal(detect(order({ platinum: 40 }), b, DEFAULT_ALERT_POLICY, NOW), null, "its own ask, by default");
+  const a = detect(order({ platinum: 40 }), b, DEFAULT_ALERT_POLICY, NOW, 60)!;
+  assert.equal(a.reference, 59);
+});
+
+test("a buy is still judged against the ask it would be sourced at", () => {
+  // The competing ask is a sell-side idea; a bid alert is unchanged by it.
+  const a = detect(order({ type: "buy", platinum: 95 }), baseline(), DEFAULT_ALERT_POLICY, NOW, 1)!;
+  assert.equal(a.reference, 60);
 });

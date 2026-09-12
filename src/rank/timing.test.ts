@@ -15,6 +15,8 @@ const input = (over: Partial<SellTimeInput> = {}): SellTimeInput => ({
 test("top of the book sells at the next buyer: one over the daily rate", () => {
   const t = sellTime(input());
   assert.equal(t.days, 0.1, "70 a week is 10 a day, so the next buyer is a tenth of a day away");
+  assert.equal(t.optimisticDays, 0.06);
+  assert.equal(t.conservativeDays, 0.15);
   assert.equal(t.confidence, "high");
 });
 
@@ -40,7 +42,16 @@ test("asking above where it trades costs a step of confidence", () => {
 test("with nothing traded there is no estimate, only a warning", () => {
   const t = sellTime(input({ volume48h: 0, volume7d: 0 }));
   assert.equal(t.days, null);
+  assert.equal(t.optimisticDays, null);
+  assert.equal(t.conservativeDays, null);
   assert.equal(t.confidence, "low");
+});
+
+test("uncertain markets get a wider conservative scenario", () => {
+  const high = sellTime(input({ daysTraded30d: 28 }));
+  const low = sellTime(input({ daysTraded30d: 4 }));
+  assert.ok(Math.abs(high.conservativeDays! - high.days! * 1.5) < 0.001);
+  assert.ok(Math.abs(low.conservativeDays! - low.days! * 3) < 0.001);
 });
 
 test("a spread waits twice: for its bid to fill, then for its ask to sell", () => {

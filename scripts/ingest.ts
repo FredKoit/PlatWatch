@@ -119,6 +119,12 @@ async function runSweep() {
       `${result.withOrders} with live orders, ${(result.elapsedMs / 60000).toFixed(1)} min` +
       (result.interrupted ? " (interrupted)" : ""),
   );
+  if (result.stoppedBy === "unreachable") {
+    console.log(`  warframe.market stopped answering — the sweep is left open; continue it with --resume`);
+  }
+  if (result.partial) {
+    console.log(`  too little of the market was fetched — recorded as partial, not used as the baseline`);
+  }
   db.close();
 }
 

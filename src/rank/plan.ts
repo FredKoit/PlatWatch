@@ -26,9 +26,14 @@ export interface PlanCandidate {
   expectedMargin: number;
   sellDays: number | null;
   sellConfidence: Confidence;
+  /** Scarce order units consumed by this trade, keyed by upstream order id. */
+  resources?: Record<string, number>;
+  /** Broad market family used to avoid concentrating the whole plan. */
+  group?: string;
+  contacts?: number;
 }
 
-export type PlanSort = "speed" | "profit" | "return";
+export type PlanSort = "speed" | "profit" | "return" | "effort";
 
 export interface PlanOptions {
   budget: number;
@@ -38,6 +43,12 @@ export interface PlanOptions {
   sortBy: PlanSort;
   /** Platinum already tied up per `itemId|variant`, from open positions. */
   held?: Map<string, number>;
+  /** Units available on each order shared by multiple candidate sets. */
+  resourceCapacity?: Map<string, number>;
+  /** Platinum deliberately left uncommitted for better listings and fees. */
+  cashReserve?: number;
+  /** Maximum planned trades in one broad market family; null disables it. */
+  maxPerGroup?: number | null;
 }
 
 export interface Plan<T> {
@@ -45,7 +56,9 @@ export interface Plan<T> {
   budget: number;
   spent: number;
   expectedProfit: number;
-  skipped: { overCap: number; held: number; lowConfidence: number; overBudget: number };
+  cashReserve: number;
+  deployableBudget: number;
+  skipped: { overCap: number; held: number; lowConfidence: number; overBudget: number; sharedStock: number; concentrated: number };
 }
 
 const RANK: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
@@ -55,6 +68,7 @@ export const keyOf = (c: { itemId: string; variant: string }) => `${c.itemId}|${
 export function planKey(c: PlanCandidate, sortBy: PlanSort): number {
   if (sortBy === "profit") return c.expectedMargin;
   if (sortBy === "return") return c.buyAt > 0 ? c.expectedMargin / c.buyAt : 0;
+  if (sortBy === "effort") return c.expectedMargin / Math.max(1, c.contacts ?? 1);
   return returnPerDay(c.expectedMargin, c.buyAt, c.sellDays);
 }
 
@@ -65,7 +79,11 @@ export function planTrades<T extends PlanCandidate>(candidates: T[], opts: PlanO
 
   const picked = new Set<string>();
   const picks: Array<T & { runningTotal: number }> = [];
-  const skipped = { overCap: 0, held: 0, lowConfidence: 0, overBudget: 0 };
+  const skipped = { overCap: 0, held: 0, lowConfidence: 0, overBudget: 0, sharedStock: 0, concentrated: 0 };
+  const reserved = new Map<string, number>();
+  const groups = new Map<string, number>();
+  const cashReserve = Math.max(0, Math.min(opts.budget, opts.cashReserve ?? 0));
+  const deployableBudget = opts.budget - cashReserve;
   let spent = 0;
   let expectedProfit = 0;
 
@@ -82,15 +100,30 @@ export function planTrades<T extends PlanCandidate>(candidates: T[], opts: PlanO
       else skipped.overCap++;
       continue;
     }
-    if (spent + c.buyAt > opts.budget) {
+    if (spent + c.buyAt > deployableBudget) {
       skipped.overBudget++;
       continue;
     }
+    if (c.group && opts.maxPerGroup !== null && opts.maxPerGroup !== undefined &&
+        (groups.get(c.group) ?? 0) >= opts.maxPerGroup) {
+      skipped.concentrated++;
+      continue;
+    }
+    const resources = Object.entries(c.resources ?? {});
+    if (resources.some(([resource, units]) =>
+      (reserved.get(resource) ?? 0) + units > (opts.resourceCapacity?.get(resource) ?? Infinity))) {
+      skipped.sharedStock++;
+      continue;
+    }
     picked.add(key);
+    for (const [resource, units] of resources) {
+      reserved.set(resource, (reserved.get(resource) ?? 0) + units);
+    }
     spent += c.buyAt;
+    if (c.group) groups.set(c.group, (groups.get(c.group) ?? 0) + 1);
     expectedProfit += c.expectedMargin;
     picks.push({ ...c, runningTotal: spent });
   }
 
-  return { picks, budget: opts.budget, spent, expectedProfit, skipped };
+  return { picks, budget: opts.budget, cashReserve, deployableBudget, spent, expectedProfit, skipped };
 }

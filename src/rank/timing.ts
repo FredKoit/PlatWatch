@@ -39,6 +39,9 @@ export interface SellTime {
   confidence: Confidence;
   /** The numbers behind it, for a tooltip. */
   basis: string;
+  /** Faster and slower outcomes around `days`; scenarios, not guarantees. */
+  optimisticDays: number | null;
+  conservativeDays: number | null;
 }
 
 /** Above this multiple of the traded median, fewer buyers exist at your price. */
@@ -49,7 +52,7 @@ export function sellTime(i: SellTimeInput): SellTime {
   const perDay =
     i.volume7d !== null && i.volume7d > 0 ? i.volume7d / 7 : Math.max(0, i.volume48h ?? 0) / 2;
   if (perDay <= 0) {
-    return { days: null, confidence: "low", basis: "nothing has traded to estimate from" };
+    return { days: null, optimisticDays: null, conservativeDays: null, confidence: "low", basis: "nothing has traded to estimate from" };
   }
 
   const tradedDays = i.daysTraded30d ?? 0;
@@ -72,9 +75,13 @@ export function sellTime(i: SellTimeInput): SellTime {
     (above ? `; asking above the ${Math.round(i.tradedMedian!)}p it trades at` : "") +
     (legs > 1 ? "; counts your bid filling as well as your ask selling" : "");
 
+  const confidence = (["low", "medium", "high"] as const)[level]!;
+  const spread = confidence === "high" ? 1.5 : confidence === "medium" ? 2 : 3;
   return {
     days: Number(days.toFixed(3)),
-    confidence: (["low", "medium", "high"] as const)[level]!,
+    optimisticDays: Number(Math.max(days * 0.6, 1 / 24).toFixed(3)),
+    conservativeDays: Number((days * spread).toFixed(3)),
+    confidence,
     basis,
   };
 }

@@ -1,6 +1,9 @@
 import type { Db } from "../db/index";
 import { liveCutoff } from "../live/book";
 
+export const ACTIONABLE_SWEEP_WINDOW_MS = 6 * 60 * 60 * 1000;
+export const actionableSweepCutoff = (now = Date.now()) => new Date(now - ACTIONABLE_SWEEP_WINDOW_MS).toISOString();
+
 /**
  * What you can actually buy — not what the cheapest price says.
  *
@@ -32,19 +35,22 @@ export interface BookOrder {
 /**
  * The rule for an order you could whisper right now.
  *
- * On the book, not owned by someone last seen offline, and either
- *   - seen by a top-of-book read, which only lists players online or in game, or
- *   - seen on the live feed inside its trust window.
- * An older feed sighting is evidence an order existed, not that it still does —
- * the same 15-minute rule the live price overlay applies, so the price a row is
- * costed at and the seller it offers come from the same set of orders.
+ * On the book, not owned by someone last seen offline, and observed inside
+ * the trust window, whether by a top-of-book read or the live feed.
+ * A top rank describes a past observation, not permanent availability.
+ * An older sighting is evidence an order existed, not that it still does —
+ * Full top-of-book observations remain usable for six hours. Feed-only orders
+ * keep the tighter 15-minute window because the recent feed reports creation,
+ * not continued availability. Every proposed purchase is refreshed again by
+ * Verify before buying.
  *
  * Callers bind `@liveCutoff`.
  */
 export const REACHABLE_ORDER = `
   left_top_at IS NULL
   AND COALESCE(user_status, '') != 'offline'
-  AND (top_rank IS NOT NULL OR last_seen > @liveCutoff)`;
+  AND ((top_rank IS NOT NULL AND last_seen > @actionableCutoff)
+    OR (top_rank IS NULL AND last_seen > @liveCutoff))`;
 
 /**
  * A reader for reachable orders, best price first: cheapest ask, highest bid.
@@ -62,8 +68,9 @@ export function bookReader(db: Db, now = Date.now()) {
                last_seen DESC`,
   );
   const cutoff = liveCutoff(now);
+  const sweepCutoff = actionableSweepCutoff(now);
   return (itemId: string, variant: string, type: "sell" | "buy"): BookOrder[] =>
-    stmt.all({ itemId, variant, type, liveCutoff: cutoff }) as BookOrder[];
+    stmt.all({ itemId, variant, type, liveCutoff: cutoff, actionableCutoff: sweepCutoff }) as BookOrder[];
 }
 
 export interface Fill {

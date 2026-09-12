@@ -65,10 +65,15 @@ test("a position that has taken far longer than expected is sitting", () => {
   assert.deepEqual(kinds(position({ heldH: 4 * 24 }), market({ expectedDays: 1 })), ["stale"]);
 });
 
+test("a fast trade warns after a meaningful overrun instead of waiting three days", () => {
+  assert.deepEqual(kinds(position({ heldH: 7 }), market({ expectedDays: 1 / 24 })), []);
+  assert.deepEqual(kinds(position({ heldH: 9 }), market({ expectedDays: 1 / 24 })), ["stale"]);
+});
+
 test("a slow item is not flagged merely for being slow", () => {
-  // Expected 5 days: holding it 4 is on schedule.
-  assert.deepEqual(kinds(position({ heldH: 4 * 24 }), market({ expectedDays: 5 })), []);
-  assert.deepEqual(kinds(position({ heldH: 11 * 24 }), market({ expectedDays: 5 })), ["stale"]);
+  // The configurable three-day maximum still prevents unlimited capital lock-up.
+  assert.deepEqual(kinds(position({ heldH: 2 * 24 }), market({ expectedDays: 5 })), []);
+  assert.deepEqual(kinds(position({ heldH: 4 * 24 }), market({ expectedDays: 5 })), ["stale"]);
 });
 
 test("without a target only the clock can fire", () => {

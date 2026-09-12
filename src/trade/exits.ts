@@ -35,10 +35,12 @@ export interface ExitPolicy {
   staleAfterDays: number;
   /** ...or once it has taken this many times its expected selling time. */
   staleMultiple: number;
+  /** Smallest meaningful overrun before a fast trade is called stale. */
+  minOverrunDays: number;
 }
 
 /** Guesses, like every other threshold here — the journal will say. */
-export const DEFAULT_EXIT_POLICY: ExitPolicy = { staleAfterDays: 3, staleMultiple: 2 };
+export const DEFAULT_EXIT_POLICY: ExitPolicy = { staleAfterDays: 3, staleMultiple: 2, minOverrunDays: 1 / 3 };
 
 export interface Position {
   tradeId: number;
@@ -98,10 +100,11 @@ export function exitSignals(
   }
 
   const heldDays = p.heldH / 24;
-  const limit = Math.max(
-    policy.staleAfterDays,
-    m.expectedDays === null ? 0 : policy.staleMultiple * m.expectedDays,
-  );
+  // Either condition is enough: a hard maximum hold, or a meaningful overrun
+  // of the market estimate. The old max() required BOTH and hid fast failures.
+  const limit = m.expectedDays === null
+    ? policy.staleAfterDays
+    : Math.min(policy.staleAfterDays, Math.max(policy.minOverrunDays, policy.staleMultiple * m.expectedDays));
   if (heldDays > limit) {
     out.push({
       kind: "stale",

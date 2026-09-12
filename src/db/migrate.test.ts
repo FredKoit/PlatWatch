@@ -159,10 +159,18 @@ test("order depth and seller status arrive as columns, leaving every observation
   ).run();
 
   const result = migrate(db);
-  assert.deepEqual(result.applied, ["8:order depth, seller status, trade targets"]);
+  assert.deepEqual(result.applied, [
+    "8:order depth, seller status, trade targets",
+    "9:durable notification outbox",
+    "10:alert outcome feedback",
+    "11:trade audit and buy fill timing",
+  ]);
   assert.ok(columns(db, "order_seen").includes("quantity"));
   assert.ok(columns(db, "order_seen").includes("user_status"));
   assert.ok(columns(db, "trade").includes("target_price"));
+  assert.ok(columns(db, "trade").includes("buy_wait_h"));
+  assert.ok(columns(db, "trade_audit").includes("before_json"));
+  assert.ok(columns(db, "notification_outbox").includes("next_attempt_at"));
 
   const kept = db.prepare("SELECT first_seen, sightings, quantity FROM order_seen WHERE order_id='o1'").get() as {
     first_seen: string;

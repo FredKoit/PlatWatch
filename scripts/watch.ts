@@ -6,7 +6,7 @@
  *   tsx scripts/watch.ts --once             — a single poll, then exit
  *   tsx scripts/watch.ts --min-profit 20
  *
- * Set DISCORD_WEBHOOK_URL to also push alerts to Discord.
+ * Set PLATWATCH_DISCORD_WEBHOOK_URL to also push alerts to Discord.
  */
 import { openDb } from "../src/db/index";
 import { latestSweepId } from "../src/rank/query";
@@ -38,7 +38,7 @@ const minProfit = flag("min-profit");
 if (minProfit) policy.minProfit = Number(minProfit);
 
 const sinks: Sink[] = [consoleSink];
-const webhook = process.env["DISCORD_WEBHOOK_URL"];
+const webhook = process.env["PLATWATCH_DISCORD_WEBHOOK_URL"];
 if (webhook) sinks.push(discordSink(webhook));
 
 const controller = new AbortController();

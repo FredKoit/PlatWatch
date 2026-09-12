@@ -26,11 +26,17 @@ export interface Job {
    * Resolve "idle" when there was nothing to do. The watchlist runs every five
    * minutes and the part-list check hourly, and both usually have nothing to
    * do; logging "started / done in 0.0s" for each was most of the log.
+   *
+   * Resolve `{ retryInMs }` to run again sooner than `everyMs` — a sweep cut
+   * short by an outage should resume when the market is back, not six hours on.
    */
-  run(signal: AbortSignal): Promise<void | "idle">;
+  run(signal: AbortSignal): Promise<void | "idle" | { retryInMs: number }>;
+  /** Retry delay after an exception; defaults to min(5 minutes, normal interval). */
+  errorRetryMs?: number;
 }
 
 const key = (name: string) => `job:${name}:lastRun`;
+const stateKey = (name: string, field: string) => `job:${name}:${field}`;
 
 export function lastRun(db: Db, name: string): string | null {
   return getMeta(db, key(name));
@@ -38,6 +44,30 @@ export function lastRun(db: Db, name: string): string | null {
 
 export function markRun(db: Db, name: string, at = new Date().toISOString()): void {
   setMeta(db, key(name), at);
+}
+
+export interface JobHealth {
+  name: string;
+  lastAttempt: string | null;
+  lastSuccess: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+}
+
+export function schedulerHealth(db: Db): JobHealth[] {
+  const rows = db.prepare("SELECT key, value FROM meta WHERE key LIKE 'job:%'").all() as Array<{key:string;value:string}>;
+  const jobs = new Map<string, JobHealth>();
+  for (const row of rows) {
+    const match = /^job:(.+):(lastAttempt|lastSuccess|lastError|failures)$/.exec(row.key);
+    if (!match) continue;
+    const health = jobs.get(match[1]!) ?? { name: match[1]!, lastAttempt:null, lastSuccess:null, lastError:null, consecutiveFailures:0 };
+    if (match[2] === "lastAttempt") health.lastAttempt = row.value || null;
+    if (match[2] === "lastSuccess") health.lastSuccess = row.value || null;
+    if (match[2] === "lastError") health.lastError = row.value || null;
+    if (match[2] === "failures") health.consecutiveFailures = Number(row.value) || 0;
+    jobs.set(health.name, health);
+  }
+  return [...jobs.values()].sort((a,b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -89,19 +119,35 @@ export async function runScheduler(db: Db, jobs: Job[], opts: SchedulerOptions):
   const launch = (job: Job) => {
     running.add(groupOf(job));
     const started = Date.now();
+    setMeta(db, stateKey(job.name, "lastAttempt"), new Date(started).toISOString());
     opts.onStart?.(job.name);
     void job
       .run(opts.signal)
       .then((result) => {
         // Stamped on completion, so a job that takes longer than its interval
-        // does not immediately become due again.
-        markRun(db, job.name);
+        // does not immediately become due again. A retry is stamped as if the
+        // job had last run `everyMs - retryInMs` ago, so it falls due after
+        // `retryInMs` through the same check as every other run.
+        const retry = typeof result === "object" && result ? result.retryInMs : null;
+        markRun(
+          db,
+          job.name,
+          retry !== null
+            ? new Date(Date.now() - job.everyMs + Math.max(0, retry)).toISOString()
+            : undefined,
+        );
+        setMeta(db, stateKey(job.name, "lastSuccess"), new Date().toISOString());
+        setMeta(db, stateKey(job.name, "lastError"), "");
+        setMeta(db, stateKey(job.name, "failures"), "0");
         opts.onFinish?.(job.name, Date.now() - started, result === "idle");
       })
       .catch((err: unknown) => {
-        // Still stamped: a failing job must back off to its interval rather
-        // than retry in a tight loop against a service that is already unhappy.
-        markRun(db, job.name);
+        const failures = Number(getMeta(db, stateKey(job.name, "failures")) ?? 0) + 1;
+        const base = Math.max(1, job.errorRetryMs ?? Math.min(5 * 60_000, job.everyMs));
+        const retryIn = Math.min(job.everyMs, base * 2 ** Math.min(failures - 1, 5));
+        markRun(db, job.name, new Date(Date.now() - job.everyMs + retryIn).toISOString());
+        setMeta(db, stateKey(job.name, "lastError"), err instanceof Error ? err.message : String(err));
+        setMeta(db, stateKey(job.name, "failures"), String(failures));
         opts.onError?.(job.name, err);
       })
       .finally(() => running.delete(groupOf(job)));
@@ -117,15 +163,12 @@ export async function runScheduler(db: Db, jobs: Job[], opts: SchedulerOptions):
     }
 
     await new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, tickMs);
-      opts.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(t);
-          resolve();
-        },
-        { once: true },
-      );
+      const onAbort = () => { clearTimeout(t); resolve(); };
+      const t = setTimeout(() => {
+        opts.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, tickMs);
+      opts.signal.addEventListener("abort", onAbort, { once: true });
     });
   }
 }

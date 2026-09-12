@@ -5,6 +5,35 @@ import { WfmError } from "../wfm/errors";
 import type { WfmOrder } from "../wfm/types";
 import { variantKey } from "../wfm/types";
 import { DEFAULT_ALERT_POLICY, detect, type Alert, type AlertPolicy, type Baseline } from "./detect";
+
+const REACHABLE_STATUS = new Set(["ingame", "online"]);
+
+/**
+ * The cheapest ask a listing's buyer would have to undercut to resell it: the
+ * book as it stood before this batch, and any other reachable listing for the
+ * same good arriving alongside it. Never the listing itself — folded into the
+ * book first, a cheap listing would be its own competition and never fire.
+ */
+export function competingAsk(
+  order: WfmOrder,
+  prior: Baseline | undefined,
+  batch: WfmOrder[],
+): number | null {
+  const key = variantKey(order);
+  const asks = batch
+    .filter(
+      (o) =>
+        o.id !== order.id &&
+        o.type === "sell" &&
+        o.visible &&
+        o.itemId === order.itemId &&
+        variantKey(o) === key &&
+        REACHABLE_STATUS.has(o.user.status),
+    )
+    .map((o) => o.platinum);
+  if (prior?.lowSell != null) asks.push(prior.lowSell);
+  return asks.length ? Math.min(...asks) : null;
+}
 import { applyLiveOrders, LIVE_OVERLAY, liveCutoff } from "./book";
 import { latestSweepId } from "../rank/query";
 
@@ -100,8 +129,8 @@ export interface WatchOptions {
   fetchRecent?: (signal?: AbortSignal) => Promise<WfmOrder[]>;
   /** Called when newer sweep data replaces the baseline. */
   onBaselineChange?: (sweepId: number) => void;
-  pollMs?: number;
-  policy?: AlertPolicy;
+  pollMs?: number | (() => number);
+  policy?: AlertPolicy | (() => AlertPolicy);
   signal?: AbortSignal;
   onAlert: (alert: Alert) => void | Promise<void>;
   onPoll?: (batch: { total: number; fresh: number; alerts: number }, stats: WatchStats) => void;
@@ -129,8 +158,8 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
  * timestamp is what reachability scoring is eventually built on.
  */
 export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
-  const policy = opts.policy ?? DEFAULT_ALERT_POLICY;
-  const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+  const policyNow = () => typeof opts.policy === "function" ? opts.policy() : (opts.policy ?? DEFAULT_ALERT_POLICY);
+  const pollMsNow = () => typeof opts.pollMs === "function" ? opts.pollMs() : (opts.pollMs ?? DEFAULT_POLL_MS);
   const resolveSweep = opts.baselineSweep ?? (() => latestSweepId(db));
   const fetchRecent = opts.fetchRecent ?? getRecentOrders;
 
@@ -161,7 +190,7 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
       stats.errors++;
       opts.onError?.(err);
       if (!(err instanceof WfmError)) throw err;
-      await sleep(pollMs, opts.signal);
+      await sleep(pollMsNow(), opts.signal);
       continue;
     }
 
@@ -176,6 +205,9 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
       for (const id of keep) seen.add(id);
     }
 
+    // The book as it stood before this batch — what a cheap listing in it has
+    // to be resold under.
+    let prior: Map<string, Baseline> = baselines;
     if (fresh.length) {
       // Position unknown (null), and not a sweep. These used to be recorded at
       // rank 0, which counted every newly posted order as "cheapest on the book"
@@ -185,29 +217,37 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
         fresh.map((order) => ({ order, rank: null })),
         { countsAsSweep: false },
       );
-      // Fold them into the live book BEFORE detecting, then reload. An order
-      // cannot trigger on itself — a new ask moves low_sell while a sell is
-      // judged against the median — but a cheap ask posted seconds earlier in
-      // the same batch legitimately makes a following bid profitable.
-      stats.liveUpdates += applyLiveOrders(db, fresh);
 
       // Re-resolve rather than reuse: a sweep may have finished since the last
       // poll, and judging against the old one is how alerts used to go silent.
       const next = resolveSweep();
-      if (next !== null) {
-        if (next !== sweepId) {
-          sweepId = next;
-          stats.baselineSweepId = next;
-          opts.onBaselineChange?.(next);
-        }
-        baselines = loadBaselines(db, sweepId);
+      if (next !== null && next !== sweepId) {
+        sweepId = next;
+        stats.baselineSweepId = next;
+        opts.onBaselineChange?.(next);
       }
+      // Read BEFORE folding the batch in: afterwards a cheap listing is the
+      // cheapest ask on its own book, and "resell under the cheapest ask" would
+      // mean reselling under itself.
+      if (sweepId !== null) prior = loadBaselines(db, sweepId);
+
+      // Then fold them into the live book and reload. A cheap ask posted seconds
+      // earlier in the same batch legitimately makes a following bid profitable.
+      stats.liveUpdates += applyLiveOrders(db, fresh);
+      if (sweepId !== null) baselines = loadBaselines(db, sweepId);
     }
     stats.newOrders += fresh.length;
 
     let fired = 0;
     for (const order of fresh) {
-      const alert = detect(order, baselines.get(`${order.itemId}|${variantKey(order)}`), policy);
+      const key = `${order.itemId}|${variantKey(order)}`;
+      const alert = detect(
+        order,
+        baselines.get(key),
+        policyNow(),
+        Date.now(),
+        competingAsk(order, prior.get(key), fresh),
+      );
       if (!alert) continue;
       if (!saveAlert(db, alert)) continue; // already reported
       stats.alerts++;
@@ -216,7 +256,7 @@ export async function watch(db: Db, opts: WatchOptions): Promise<WatchStats> {
     }
 
     opts.onPoll?.({ total: orders.length, fresh: fresh.length, alerts: fired }, stats);
-    await sleep(pollMs, opts.signal);
+    await sleep(pollMsNow(), opts.signal);
   }
 
   return stats;

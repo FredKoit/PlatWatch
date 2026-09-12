@@ -8,12 +8,35 @@ import {
   type SnapshotRow,
 } from "../db/repo";
 import { getTopOrders } from "../wfm/client";
-import { WfmError } from "../wfm/errors";
-import type { WfmOrder } from "../wfm/types";
+import { WfmEndpointRetiredError, WfmError, WfmUnavailableError } from "../wfm/errors";
+import type { TopOrders, WfmOrder } from "../wfm/types";
 import type { ItemRow } from "./details";
 
 /** Flush size. Large enough that fsync is amortised, small enough to lose little. */
 const BATCH = 200;
+
+/**
+ * Failures in a row that mean warframe.market is unreachable, not that a few
+ * items are odd. Each one has already been retried four times with backoff.
+ *
+ * Without this, an outage ground through the whole catalogue — about 5.6s of
+ * retries per item, some six hours — and then stamped the empty result as a
+ * finished full sweep. That became "the market": the ranking emptied, the
+ * sniper lost every baseline, and nothing said why. A 403 counts too: it is as
+ * likely a block as a retired route, and hammering a block is the worst reply.
+ */
+export const MAX_CONSECUTIVE_OUTAGE_FAILURES = 10;
+
+/**
+ * Below this share of the catalogue fetched, a sweep that ran to the end is
+ * recorded as partial. Healthy sweeps reach ~100%; one that lost a stretch of
+ * the market to a flaky network would otherwise silently drop those items from
+ * the ranking until the next sweep.
+ */
+export const MIN_BASELINE_COVERAGE = 0.9;
+
+const isOutage = (err: unknown): boolean =>
+  err instanceof WfmUnavailableError || err instanceof WfmEndpointRetiredError;
 
 export interface SweepProgress {
   (done: number, total: number, ok: number, failed: number): void;
@@ -25,8 +48,12 @@ export interface SweepResult {
   failed: number;
   withOrders: number;
   elapsedMs: number;
-  /** True if the run stopped early (interrupt or abort). */
+  /** True if the run stopped early (interrupt, abort, or an outage). */
   interrupted: boolean;
+  /** Set when it stopped because warframe.market stopped answering. */
+  stoppedBy?: "unreachable";
+  /** Set when it ran to the end but covered too little to be the baseline. */
+  partial?: boolean;
 }
 
 export function itemsToSweep(db: Db): ItemRow[] {
@@ -54,10 +81,14 @@ export async function sweepTopOrders(
     signal?: AbortSignal;
     /** Watchlist refreshes outrank the nightly crawl. See PRIORITY. */
     priority?: number;
+    /** Injectable for tests; defaults to /v2/orders/item/{slug}/top. */
+    fetchTop?: (slug: string, signal?: AbortSignal) => Promise<TopOrders>;
   } = {},
 ): Promise<SweepResult> {
   const startedAt = Date.now();
   const sweepId = opts.sweepId ?? startSweep(db, "top");
+  const fetchTop =
+    opts.fetchTop ?? ((slug: string, signal?: AbortSignal) => getTopOrders(slug, signal, opts.priority));
 
   const alreadyDone = new Set(
     (
@@ -71,6 +102,8 @@ export async function sweepTopOrders(
   let failed = 0;
   let withOrders = 0;
   let interrupted = false;
+  let stoppedBy: SweepResult["stoppedBy"];
+  let outageRun = 0;
 
   let snapBuffer: SnapshotRow[] = [];
   let orderBuffer: Array<{ order: WfmOrder; rank: number }> = [];
@@ -93,7 +126,8 @@ export async function sweepTopOrders(
     }
 
     try {
-      const top = await getTopOrders(item.slug, opts.signal, opts.priority);
+      const top = await fetchTop(item.slug, opts.signal);
+      outageRun = 0;
       snapBuffer.push(...summariseByVariant(item.id, top));
 
       const present: string[] = [];
@@ -118,6 +152,13 @@ export async function sweepTopOrders(
         flush();
         throw err;
       }
+      // A 404 is one odd item; only an unbroken run of outages stops the sweep.
+      outageRun = isOutage(err) ? outageRun + 1 : 0;
+      if (outageRun >= MAX_CONSECUTIVE_OUTAGE_FAILURES) {
+        interrupted = true;
+        stoppedBy = "unreachable";
+        break;
+      }
     }
 
     if (snapBuffer.length >= BATCH) flush();
@@ -127,8 +168,10 @@ export async function sweepTopOrders(
   flush();
   // Leave `finished_at` NULL when we stopped early, so --resume can find this
   // sweep and continue it. Stamping it here would make a clean Ctrl-C *worse*
-  // than pulling the power: the interrupted run would look complete.
-  if (!interrupted) finishSweep(db, sweepId, ok, failed);
+  // than pulling the power: the interrupted run would look complete. The same
+  // goes for an outage: the previous baseline stays until the market answers.
+  const partial = !interrupted && ok < items.length * MIN_BASELINE_COVERAGE;
+  if (!interrupted) finishSweep(db, sweepId, ok, failed, partial ? "partial" : undefined);
 
   return {
     sweepId,
@@ -137,5 +180,7 @@ export async function sweepTopOrders(
     withOrders,
     elapsedMs: Date.now() - startedAt,
     interrupted,
+    ...(stoppedBy ? { stoppedBy } : {}),
+    ...(partial ? { partial } : {}),
   };
 }

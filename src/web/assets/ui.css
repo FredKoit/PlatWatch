@@ -1,0 +1,283 @@
+:root{
+    --bg:#0f1319; --panel:#161c24; --panel-2:#1d242e; --line:#2a333f;
+    --ink:#dfe6ed; --ink-2:#95a3b1; --ink-3:#6b7885;
+    --gold:#cfa451; --cyan:#6fb6c4; --good:#6cb37c; --bad:#d9756c; --warn:#d2a44f;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+  }
+  .num{font-family:"Cascadia Mono",Consolas,monospace; font-variant-numeric:tabular-nums}
+
+  header{
+    display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel);
+  }
+  h1{margin:0; font-size:17px; letter-spacing:.06em; text-transform:uppercase; color:var(--gold)}
+  .stat{font-size:12px; color:var(--ink-3)}
+  .stat b{color:var(--ink-2); font-weight:600}
+  #stale{color:var(--warn)}
+
+  nav{display:flex; gap:2px; padding:0 20px; border-bottom:1px solid var(--line); background:var(--panel)}
+  nav button{
+    background:none; border:0; border-bottom:2px solid transparent; cursor:pointer;
+    color:var(--ink-3); padding:9px 14px; font:inherit; font-size:13px;
+  }
+  nav button[aria-selected="true"]{color:var(--gold); border-bottom-color:var(--gold)}
+  nav button:hover{color:var(--ink)}
+
+  .bar{display:flex; gap:10px; align-items:center; padding:12px 20px; flex-wrap:wrap}
+  select,input[type=search]{
+    background:var(--panel-2); color:var(--ink); border:1px solid var(--line);
+    border-radius:4px; padding:5px 8px; font:inherit; font-size:13px;
+  }
+  label.chk{display:flex; gap:6px; align-items:center; font-size:13px; color:var(--ink-2); cursor:pointer}
+
+  /* Labelled controls. A bare input with only placeholder text is invisible in
+     a row of other controls — the placeholder also disappears the moment you
+     type, taking the only explanation of the field with it. */
+  .field{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-3)}
+  .field > span{white-space:nowrap; letter-spacing:.03em; text-transform:uppercase; font-size:11px}
+  .field input[type=number]{width:88px; text-align:right}
+  .field .unit{color:var(--ink-3); margin-left:-3px}
+
+  .wrap{padding:0 20px 40px; overflow-x:auto}
+  table{border-collapse:collapse; width:100%; font-size:13px}
+  th{
+    text-align:left; padding:7px 10px; font-size:11px; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--ink-3); border-bottom:1px solid var(--line);
+    position:sticky; top:0; background:var(--bg);
+  }
+  td{padding:7px 10px; border-bottom:1px solid #1c232c; vertical-align:middle}
+  tbody tr:hover{background:var(--panel)}
+  td.r,th.r{text-align:right}
+  .name{font-weight:600}
+  .variant{
+    display:inline-block; margin-left:6px; padding:1px 5px; border-radius:3px;
+    background:var(--panel-2); color:var(--cyan); font-size:11px;
+  }
+  .kind{font-size:11px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.05em}
+  .margin{color:var(--good); font-weight:600}
+  .who{color:var(--ink-2); font-size:12px}
+  .rate{font-size:11px}
+  .rate.good{color:var(--good)} .rate.bad{color:var(--bad)} .rate.none{color:var(--ink-3)}
+  .age-fresh{color:var(--ink-3)} .age-old{color:var(--warn)}
+  .live{color:var(--good); font-size:11px}
+  .ghost{color:var(--warn); font-size:11px; margin-left:6px}
+  .play{font-size:11px; color:var(--ink-3); white-space:nowrap}
+  .play b{color:var(--cyan); font-weight:600}
+  dialog .parts{padding:14px 18px; display:grid; gap:10px; max-width:430px}
+  dialog .part{
+    display:flex; align-items:center; gap:10px; justify-content:space-between;
+    border-bottom:1px solid var(--line-soft, #242e38); padding-bottom:9px;
+  }
+  dialog .part:last-child{border-bottom:0; padding-bottom:0}
+  dialog .part .pn{font-size:13px}
+  dialog .part .pq{color:var(--gold); font-weight:600}
+  dialog .part.acquired .pn{text-decoration:line-through;color:var(--ink-3)}
+  dialog .part-check{display:flex;align-items:center;gap:9px;cursor:pointer}
+  .check-progress{color:var(--gold);font-size:10px;margin-left:7px}
+
+  /* Sets tab: one row per set, expanding into its shopping list. */
+  #sets tr.set-row{cursor:pointer}
+  #sets tr.held > td{opacity:.6}
+  button.tog{background:none; border:0; cursor:pointer; color:var(--ink-3); font-size:12px; padding:0 2px}
+  tr[aria-expanded="true"] button.tog{color:var(--gold)}
+  .sub{font-size:11px; color:var(--ink-3); font-weight:400}
+  .capped{color:var(--warn)}
+  .why{font-size:11px; color:var(--bad)}
+  .loss{color:var(--bad); font-weight:600}
+  tr.breakdown > td{background:var(--panel); padding:2px 10px 12px}
+  #sets tbody tr.breakdown:hover{background:none}
+  table.bd{width:auto; font-size:12px}
+  table.bd td{border-bottom:1px solid var(--line); padding:5px 10px}
+  table.bd .pq{color:var(--gold); font-weight:600}
+  table.bd tr.tot td{border-bottom:0; color:var(--ink-2)}
+  table.bd tr.tot td.margin{color:var(--good)}
+  table.bd tr.tot td.loss{color:var(--bad)}
+  table.bd tr.tot.first td{border-top:1px solid var(--ink-3)}
+
+  button.act,a.act{
+    background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line);
+    border-radius:4px; padding:3px 8px; font:inherit; font-size:12px; cursor:pointer;
+    white-space:nowrap;
+  }
+  button.act:hover,a.act:hover{border-color:var(--gold); color:var(--gold)}
+  button.act.done{border-color:var(--good); color:var(--good)}
+  button.star{background:none;border:0;cursor:pointer;color:var(--ink-3);font-size:15px;padding:0 2px}
+  button.star.on{color:var(--gold)}
+  .suspicious{color:var(--bad); font-size:11px; margin-left:6px}
+  .empty{padding:40px 20px; color:var(--ink-3); text-align:center}
+  .hint{padding:0 20px 14px; color:var(--ink-3); font-size:12px; max-width:80ch}
+
+  dialog{
+    border:1px solid var(--line); border-radius:6px; background:var(--panel);
+    color:var(--ink); padding:0; min-width:300px; font:inherit;
+  }
+  dialog::backdrop{background:rgba(0,0,0,.55)}
+  dialog h3{margin:0; padding:14px 18px; border-bottom:1px solid var(--line); font-size:14px}
+  dialog .fields{padding:16px 18px; display:grid; gap:12px}
+  dialog label{display:grid; gap:5px; font-size:12px; color:var(--ink-2)}
+  dialog input{
+    background:var(--panel-2); color:var(--ink); border:1px solid var(--line);
+    border-radius:4px; padding:7px 9px; font:inherit; font-size:14px;
+  }
+  dialog input:focus-visible{outline:2px solid var(--gold); outline-offset:1px}
+  dialog .hint-inline{font-size:11px; color:var(--ink-3); font-weight:400}
+  dialog .warn-inline{font-size:11px; color:var(--bad); min-height:14px}
+  dialog menu{
+    margin:0; padding:12px 18px; border-top:1px solid var(--line);
+    display:flex; gap:8px; justify-content:flex-end;
+  }
+
+:root{color-scheme:dark;--bg:#0b1014;--panel:#11191e;--panel-2:#192329;--line:#29363d;--ink:#e8f0f2;--ink-2:#adbec5;--ink-3:#83979f;--gold:#64dfc0;--cyan:#8bc8ed;--good:#64dfaa;--bad:#f18d8d;--warn:#e5be73}
+  body{font:14px/1.55 "Segoe UI",system-ui,sans-serif;padding:0 36px 32px;max-width:1800px;margin:auto}
+  header{padding:28px 0 22px;background:none;border:0;align-items:center;gap:14px}
+  .brand{display:flex;align-items:center;gap:12px;margin-right:auto}
+  .brand-mark{width:38px;height:38px;display:grid;place-items:center;border:1px solid #408d7c;border-radius:11px;background:#142c29;color:var(--gold);font-size:25px;font-weight:700}
+  h1{font-size:21px;letter-spacing:-.7px;text-transform:none;color:var(--ink)}
+  .brand-sub{font-size:10px;letter-spacing:2px;color:var(--ink-3);text-transform:uppercase}
+  .platform{font-size:11px;letter-spacing:1px;color:var(--ink-2);border:1px solid var(--line);padding:5px 10px;border-radius:6px}
+  .metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border:1px solid var(--line);border-radius:12px;background:var(--panel);margin-bottom:28px;overflow:hidden}
+  .metrics .stat{padding:17px 22px;border-right:1px solid var(--line);display:flex;flex-direction:column-reverse;gap:5px;font-size:11px;letter-spacing:.04em;color:var(--ink-3)}
+  .metrics .stat:last-child{border:0}.metrics b{font-size:24px;font-weight:600;letter-spacing:-.7px;color:var(--ink);font-variant-numeric:tabular-nums}
+  #stale:empty{display:none}#stale{font-size:12px}
+  nav{background:none;padding:0;gap:24px;overflow-x:auto;white-space:nowrap;margin-bottom:27px}
+  nav button{padding:12px 2px 15px;font-weight:600;font-size:13px;color:var(--ink-3);border-bottom-width:3px}
+  .section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}
+  .section-heading h2{font-size:25px;letter-spacing:-.8px;margin:0 0 4px;font-weight:600}
+  .section-heading p{margin:0;color:var(--ink-3);font-size:13px}
+  .section-index{color:var(--gold);font:12px Consolas,monospace;letter-spacing:2px}
+  section{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+  .bar{padding:18px 20px;gap:14px;border-bottom:1px solid var(--line);background:#131d23}
+  select,input[type=search],input[type=number]{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:9px 11px;font:inherit;font-size:12px;min-height:38px}
+  input[type=search]{min-width:200px}input::placeholder{color:var(--ink-3)}
+  input[type=checkbox]{accent-color:var(--gold);width:15px;height:15px}
+  .field{gap:8px}.field>span{font-size:10px}.field input[type=number]{width:78px}
+  button.act{border-radius:6px;padding:6px 10px;background:#1b2b31;color:#c4d7df;font-size:11px;min-height:30px}
+  .bar>button.act{margin-left:auto;background:var(--gold);color:#0b2922;border-color:var(--gold);font-weight:700;padding:9px 16px}
+  .bar>button.act:hover{background:#8aeacf;color:#0b2922}
+  button,input,select,summary{transition:border-color .15s,background .15s}
+  :focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+  .wrap{padding:0;overflow:auto}table{font-size:12px;white-space:nowrap}
+  th{background:#141f25;padding:13px 14px;font-size:10px;letter-spacing:.08em;font-weight:600}
+  td{padding:15px 14px;border-bottom:1px solid #202c32}tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#19262c}.name{font-size:13px;font-weight:600}.num{font-size:12px}
+  .kind{font-size:9px;letter-spacing:.08em}.variant{border-radius:4px;padding:2px 6px}
+  .margin{color:var(--good)}.empty{padding:65px 24px;color:var(--ink-2);white-space:normal}
+  .guide{border-bottom:1px solid var(--line);background:#101a1f}
+  .guide summary{padding:12px 20px;color:var(--ink-3);font-size:12px;cursor:pointer}
+  .guide summary:hover{color:var(--ink)}.guide .hint{padding:0 20px 16px;margin:0;max-width:110ch;line-height:1.8}
+  section>.hint{margin:0;padding:17px 20px;max-width:110ch;line-height:1.8}
+  dialog{border-radius:14px;box-shadow:0 24px 100px #0008;max-width:calc(100vw - 32px)}
+  dialog::backdrop{background:#03090dc9;backdrop-filter:blur(5px)}dialog h3{padding:21px 24px;font-size:17px}dialog .fields{padding:22px 24px}
+  dialog menu{padding:16px 24px}#modal-ok{background:var(--gold);color:#0b2922}
+  #pnl-bar .stat{padding-right:15px}#tab-trades .wrap+.wrap{border-top:1px solid var(--line)}
+  #pnl-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));padding:0}
+  #pnl-bar .stat{padding:14px 16px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+  #pnl-bar .stat b{font-size:19px;color:var(--ink)}
+  .decision{display:grid;gap:5px;max-width:380px}.decision-actions{display:flex;gap:5px;flex-wrap:wrap}
+  .risk-meter{display:inline-flex;align-items:center;gap:6px}.risk-meter::before{content:"";width:28px;height:4px;background:linear-gradient(90deg,var(--bad),var(--warn),var(--good));opacity:.85}.risk-meter.good{color:var(--good)}.risk-meter.warn{color:var(--warn)}.risk-meter.bad{color:var(--bad)}
+  .seller-routes{border-bottom:1px solid var(--line);padding:12px 18px}.seller-routes summary{cursor:pointer;color:var(--ink-2);font-size:12px}.route-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin-top:10px}.route{border:1px solid var(--line);padding:10px;display:grid;gap:6px}.route-head{display:flex;justify-content:space-between;gap:8px}.route ul{list-style:none;margin:0;padding:0;color:var(--ink-3);font-size:11px}
+  .footer{display:flex;justify-content:space-between;gap:16px;padding-top:18px;color:var(--ink-3);font-size:10px;letter-spacing:.04em}
+  @media(min-width:1500px){td{padding-top:18px;padding-bottom:18px}}
+  @media(max-width:900px){body{padding:0 20px 24px}.metrics .stat{padding:14px}.metrics b{font-size:21px}.bar{gap:12px}.field{flex-wrap:wrap}nav{gap:20px}.bar>button.act{margin-left:0}}
+  @media(max-width:600px){body{padding:0 12px 20px}header{padding:20px 2px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:16px}.metrics .stat{border-bottom:1px solid var(--line)}.metrics .stat:last-child{grid-column:1/-1}.metrics b{font-size:20px}nav{margin-bottom:20px}.section-heading h2{font-size:23px}.section-index{display:none}.bar{padding:14px}.bar input[type=search]{width:100%;min-width:0}.bar>.field{flex:1 1 140px}.bar>button.act{margin-left:auto}.footer{flex-direction:column;gap:4px}.platform{font-size:9px}.guide summary{padding:12px 14px}}
+.mobile-view{display:none}
+  .load-feedback{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line);color:var(--ink-2);font-size:12px}
+  .load-feedback[hidden]{display:none}.load-feedback[data-error="true"]{color:var(--warn)}
+  section[aria-busy="true"] .wrap{opacity:.55;pointer-events:none}
+  td.margin,td.loss{font-size:14px;font-weight:700;background:#64dfaa06}
+  #ops td:nth-child(6),#ops td:nth-child(8),#ops td:nth-child(9),#sets td:nth-child(6),#sets td:nth-child(7){color:var(--ink-3);font-size:11px}
+  .name{font-size:14px}.play{color:var(--ink-2)}
+  .freshness{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:3px 6px;font-size:10px;font-weight:500;white-space:nowrap}
+  .freshness.live{color:var(--good);background:#64dfaa0d;border-color:#64dfaa33}
+  .freshness.aging{color:var(--warn);background:#e5be730d;border-color:#e5be7333}
+  .freshness.stale{color:var(--bad);background:#f18d8d0d;border-color:#f18d8d33}
+  .freshness.recent,.freshness.unknown{color:var(--ink-3)}
+  @media(max-width:600px){
+    header{padding:14px 2px}.metrics{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:12px}
+    .metrics .stat{padding:8px 10px;gap:0;font-size:9px}.metrics b{font-size:16px}
+    .metrics .stat:last-child{grid-column:auto}.metrics .stat:nth-child(3){border-right:0}
+    nav{display:none}.mobile-view{display:flex;align-items:center;gap:12px;margin:12px 0 16px;color:var(--ink-3);font-size:12px}
+    .mobile-view select{flex:1;min-width:0}.section-heading{margin-bottom:14px}.section-heading p{font-size:12px}
+    td{padding:12px 10px}.load-feedback{padding:12px 14px}
+  }
+/* Readability. Tables run to hundreds of rows, so the header has to stay in
+     view (each table scrolls inside its own frame — sticky needs a scroller),
+     rows have to be dense enough to compare, and every abbreviated column
+     explains itself on hover. */
+  .wrap{max-height:calc(100vh - 140px)}
+  th{z-index:1}
+  th[title]{text-decoration:underline dotted #4a5a62;text-underline-offset:4px;cursor:help}
+  th[data-sort]{cursor:pointer;user-select:none}
+  th[data-sort]:hover{color:var(--ink)}
+  th[aria-sort]{color:var(--gold)}
+  th[aria-sort="ascending"]::after{content:" ▲"}
+  th[aria-sort="descending"]::after{content:" ▼"}
+  body.compact td{padding-top:8px;padding-bottom:8px}
+  body.compact table.bd td{padding-top:4px;padding-bottom:4px}
+  .u{color:var(--ink-3);font-weight:400;margin-left:1px}
+  .sub{display:block;margin-top:2px}
+  .tag{display:inline-block;font-size:10px;font-weight:500;letter-spacing:.02em;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--ink-2);margin-left:6px;vertical-align:1px;white-space:nowrap}
+  .tag.warn{color:var(--warn);border-color:#e5be7340}
+  .tag.bad{color:var(--bad);border-color:#f18d8d40}
+  .tag.good{color:var(--good);border-color:#64dfaa40}
+  .kind .tag{text-transform:none;letter-spacing:.02em}
+  .density{margin-left:auto;font-size:12px}
+  .updated{font-size:11px;color:var(--ink-3);white-space:nowrap}
+  .bar>button.act+.updated{margin-left:-4px}
+
+  /* Feedback: every action says whether it worked. */
+  #toasts{position:fixed;right:20px;bottom:20px;display:grid;gap:8px;z-index:50;max-width:min(440px,calc(100vw - 40px))}
+  .toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:8px;padding:10px 14px;font-size:12px;line-height:1.5;color:var(--ink);box-shadow:0 8px 30px #0009}
+  .toast.error{border-left-color:var(--bad)}
+  button.act:disabled{opacity:.6;cursor:progress}
+  .load-feedback .act{margin-left:4px}
+  tr.placeholder td{color:var(--ink-3)}
+
+  /* The plan's figures: the numbers a budget decision turns on. */
+  .plan-summary:empty{display:none}
+  .plan-summary{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line)}
+  .plan-summary .stat{display:flex;flex-direction:column;gap:2px;padding:14px 20px;border-right:1px solid var(--line);font-size:11px;color:var(--ink-3)}
+  .plan-summary .stat b{font-size:20px;font-weight:600;color:var(--ink);letter-spacing:-.4px}
+  .plan-summary .stat em{font-style:normal;font-size:11px;color:var(--ink-3)}
+  .plan-skipped{flex-basis:100%;margin:0;padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--ink-3)}
+
+  /* An item name opens its price history. It stays a name, visually. */
+  button.name.link{background:none;border:0;padding:0;font:inherit;font-size:14px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left}
+  button.name.link:hover{color:var(--gold);text-decoration:underline;text-underline-offset:3px}
+  button.linkish{background:none;border:0;padding:0;font:inherit;font-size:11px;color:var(--ink-3);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+  button.linkish:hover{color:var(--gold)}
+  .fill{display:flex;align-items:center;gap:8px;white-space:nowrap}
+  .fill+.fill{margin-top:4px}
+  .exits{display:grid;gap:4px;margin-bottom:6px;white-space:normal;max-width:360px}
+
+  /* Price history. One series hue (validated on this surface), text in text
+     tokens, gridlines as hairlines; price and volume are two panels on one
+     date axis, never one chart with two y-scales. */
+  #history{width:min(920px,calc(100vw - 32px));--series:#3987e5}
+  .hist-head{display:flex;gap:16px;justify-content:space-between;align-items:flex-start;padding:18px 22px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .hist-head h3{padding:0;border:0;margin:0 0 4px;font-size:17px}
+  #hist-summary{margin:0;font-size:12px;color:var(--ink-2)}
+  .hist-controls{display:flex;gap:8px;align-items:center}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{background:none;border:0;color:var(--ink-3);font:inherit;font-size:12px;padding:6px 10px;cursor:pointer}
+  .seg button[aria-pressed="true"]{background:var(--panel-2);color:var(--ink);font-weight:600}
+  #hist-body{padding:14px 22px 20px;position:relative}
+  .chart svg{display:block;width:100%;height:auto;overflow:visible}
+  .chart .grid{stroke:#243037;stroke-width:1}
+  .chart .axis{fill:var(--ink-3);font-size:10px;font-family:"Segoe UI",system-ui,sans-serif}
+  .chart .panel-label{fill:var(--ink-2);font-size:11px;font-weight:600}
+  .chart .ref{stroke:var(--ink-2);stroke-width:1}
+  .chart .ref-label{fill:var(--ink-2);font-size:10px}
+  .chart .end-label{fill:var(--ink);font-size:11px;font-weight:600}
+  .chart .cross{stroke:var(--ink-3);stroke-width:1}
+  .chart .hit{fill:transparent;cursor:crosshair}
+  .chart .hit:focus-visible{outline:none;stroke:var(--gold);stroke-width:1}
+  .hist-tip{position:absolute;pointer-events:none;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:11px;color:var(--ink-2);white-space:nowrap;box-shadow:0 8px 24px #0009}
+  .hist-tip b{color:var(--ink);font-size:13px}
+  .hist-tip .key{display:inline-block;width:12px;height:2px;background:var(--series);vertical-align:middle;margin-right:6px}
+  .hist-table{max-height:340px;overflow:auto}
+  .hist-note{font-size:11px;color:var(--ink-3);margin-top:8px}

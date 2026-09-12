@@ -213,6 +213,50 @@ export const MIGRATIONS: Migration[] = [
       addColumn(db, "trade", "target_price", "INTEGER");
     },
   },
+  {
+    version: 9,
+    name: "durable notification outbox",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS notification_outbox (
+          id INTEGER PRIMARY KEY,
+          dedupe_key TEXT NOT NULL UNIQUE,
+          kind TEXT NOT NULL CHECK (kind IN ('alert','notice')),
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at TEXT NOT NULL,
+          last_error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS notification_outbox_due
+          ON notification_outbox(next_attempt_at);
+      `);
+    },
+  },
+  {
+    version: 10,
+    name: "alert outcome feedback",
+    up(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS alert_feedback (
+        alert_id INTEGER PRIMARY KEY REFERENCES alert(id) ON DELETE CASCADE,
+        outcome TEXT NOT NULL CHECK (outcome IN ('bought','already_gone','no_reply','margin_disappeared')),
+        trade_id INTEGER REFERENCES trade(id) ON DELETE SET NULL,
+        note TEXT,
+        recorded_at TEXT NOT NULL
+      )`);
+    },
+  },
+  {
+    version: 11,
+    name: "trade audit and buy fill timing",
+    up(db) {
+      addColumn(db, "trade", "buy_wait_h", "REAL");
+      db.exec(`CREATE TABLE IF NOT EXISTS trade_audit (
+        id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL, action TEXT NOT NULL,
+        before_json TEXT, after_json TEXT, note TEXT, created_at TEXT NOT NULL
+      ); CREATE INDEX IF NOT EXISTS trade_audit_trade ON trade_audit(trade_id, created_at DESC)`);
+    },
+  },
 ];
 
 export interface MigrationResult {

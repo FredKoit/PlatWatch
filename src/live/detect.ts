@@ -52,6 +52,8 @@ export interface AlertPolicy {
   reachableOnly: boolean;
   /** Discounts steeper than this are flagged: usually a typo or a bait listing. */
   suspiciousDiscount: number;
+  /** What a resale must undercut the cheapest competing ask by, to be seen first. */
+  undercut: number;
 }
 
 export const DEFAULT_ALERT_POLICY: AlertPolicy = {
@@ -62,6 +64,7 @@ export const DEFAULT_ALERT_POLICY: AlertPolicy = {
   maxBaselineAgeH: 36,
   reachableOnly: true,
   suspiciousDiscount: 0.3,
+  undercut: 1,
 };
 
 export type AlertKind = "underpriced_sell" | "overpriced_buy";
@@ -75,7 +78,11 @@ export interface Alert {
   variant: string;
   /** The price on the order that triggered this. */
   platinum: number;
-  /** What it was judged against: fair value for a sell, the ask for a buy. */
+  /**
+   * The other side of the trade. For a sell: what you could resell at — its
+   * worth, capped just under any cheaper ask already listed. For a buy: the ask
+   * you would source it at.
+   */
   reference: number;
   profit: number;
   profitPct: number;
@@ -115,12 +122,19 @@ function hoursBetween(iso: string, now: number): number {
  * Deliberately silent rather than explanatory: this runs on every order posted
  * market-wide, and collecting reasons for the ~99% that are ordinary would cost
  * more than the decision itself.
+ *
+ * `competingAsk` is the cheapest ask a listing's buyer would have to undercut
+ * to resell it — excluding the listing itself. It defaults to the baseline's
+ * cheapest ask, which is right for a baseline that has not yet seen the order.
+ * The watcher, which folds each batch into the book before detecting, passes
+ * the book as it stood before the batch.
  */
 export function detect(
   order: WfmOrder,
   baseline: Baseline | undefined,
   policy: AlertPolicy = DEFAULT_ALERT_POLICY,
   now = Date.now(),
+  competingAsk: number | null = baseline?.lowSell ?? null,
 ): Alert | null {
   if (!baseline || !order.visible) return null;
   if (policy.reachableOnly && !REACHABLE.includes(order.user.status)) return null;
@@ -165,24 +179,32 @@ export function detect(
     // ever costs a missed alert; being optimistic costs platinum.
     const asked = baseline.fairValue;
     const traded = baseline.median7d ?? null;
-    const reference =
+    const worth =
       asked !== null && traded !== null ? Math.min(asked, traded) : (asked ?? traded);
-    if (reference === null) return null;
-    if (order.platinum > reference * policy.sellDiscount) return null;
+    if (worth === null) return null;
+    if (order.platinum > worth * policy.sellDiscount) return null;
 
-    const profit = reference - order.platinum;
+    // Worth is not a sale price. To resell you must be the cheapest listing,
+    // so a seller already asking less than the median caps what you get. This
+    // used to be ignored: Volt Prime Neuroptics fired at 35p "under a 45p
+    // median" with a 15p ask on the book. On 151 real alerts, 143 overstated
+    // their profit this way and 51 had none at all. A listing at or above the
+    // cheapest ask is no bargain, and this makes its profit negative.
+    const resale =
+      competingAsk !== null ? Math.min(worth, competingAsk - policy.undercut) : worth;
+    const profit = resale - order.platinum;
     if (profit < policy.minProfit) return null;
 
     return {
       ...common,
       kind: "underpriced_sell",
-      reference,
+      reference: resale,
       profit,
-      profitPct: profit / reference,
-      // Either the listing is far under the reference, or the book itself has
-      // detached from what the item trades at.
+      profitPct: profit / resale,
+      // Either the listing is far under what the item is worth, or the book
+      // itself has detached from what the item trades at.
       suspicious:
-        order.platinum < reference * policy.suspiciousDiscount ||
+        order.platinum < worth * policy.suspiciousDiscount ||
         (asked !== null && traded !== null && asked > traded * 3),
       whisper: whisperFor(order.user.ingameName, baseline.name, order.platinum, "buy"),
     };

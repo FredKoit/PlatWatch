@@ -148,6 +148,8 @@ export interface Opportunity {
   liveAt?: string | null;
   /** Expected days to sell at `sellAt` — how long the platinum is tied up. */
   sellDays: number | null;
+  sellDaysOptimistic: number | null;
+  sellDaysConservative: number | null;
   sellConfidence: Confidence;
   sellBasis: string;
   median7d: number | null;
@@ -179,6 +181,8 @@ function marketFacts(row: MarketRow, sellAt: number, legs = 1) {
   });
   return {
     sellDays: t.days,
+    sellDaysOptimistic: t.optimisticDays,
+    sellDaysConservative: t.conservativeDays,
     sellConfidence: t.confidence,
     sellBasis: t.basis,
     median7d: row.median7d ?? null,

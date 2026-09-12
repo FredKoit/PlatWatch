@@ -1,4 +1,5 @@
-import type { Db } from "../db/index";
+import { getMeta, type Db } from "../db/index";
+import { schedulerHealth } from "../daemon/scheduler";
 import { latestSweepId, setRows, spreadRows } from "../rank/query";
 import {
   DEFAULT_POLICY,
@@ -14,7 +15,7 @@ import {
 } from "../rank/score";
 import { whisperFor } from "../live/detect";
 import { liveCutoff } from "../live/book";
-import { REACHABLE_ORDER } from "../rank/depth";
+import { REACHABLE_ORDER, actionableSweepCutoff } from "../rank/depth";
 import { keyOf, planTrades, type Plan, type PlanSort } from "../rank/plan";
 import type { Confidence } from "../rank/timing";
 import { strategyCalibration } from "../trade/journal";
@@ -37,6 +38,8 @@ export interface Counterparty {
 
 /** One seller a part is bought from — more than one when the cheapest has too few. */
 export interface PartFill {
+  orderId: string;
+  stock: number;
   seller: Counterparty;
   units: number;
   platinum: number;
@@ -91,6 +94,8 @@ export interface Row extends Opportunity {
   /** For "post": the two orders to place, and wait for. */
   postBuyAt: number | null;
   postSellAt: number | null;
+  contacts: number;
+  profitPerContact: number;
   /**
    * An active attempt at the buy leg — offering the cheapest seller the price
    * the model assumes, not their asking price. Often declined; that is the
@@ -112,6 +117,59 @@ export interface Row extends Opportunity {
    * either the seller does not respond or the price is fiction.
    */
   ghostSweeps: number;
+  /** 0–100 confidence in capturing the calibrated margin under current conditions. */
+  riskScore: number;
+  /** Expected margin discounted by freshness, liquidity confidence, trend, and ghost risk. */
+  riskAdjustedMargin: number;
+  riskFlags: string[];
+  profitScenarios: ProfitScenarios;
+}
+
+export interface ProfitScenarios {
+  /** Current listing plan. */
+  proposed: { sellAt: number; profit: number };
+  /** Profit at the recent completed-trade median. */
+  historical: { sellAt: number; profit: number } | null;
+  /** Exit available from the highest reachable buyer right now. */
+  immediate: { sellAt: number; profit: number } | null;
+  /** A simple adverse move, deliberately concrete rather than statistical. */
+  downside5: { sellAt: number; profit: number };
+  breakEven: number;
+}
+
+export function profitScenariosOf(
+  row: Pick<Opportunity, "buyAt" | "sellAt" | "median7d">,
+  buyer: Counterparty | null,
+): ProfitScenarios {
+  const at = (sellAt: number) => ({ sellAt, profit: sellAt - row.buyAt });
+  return {
+    proposed: at(row.sellAt),
+    historical: row.median7d === null ? null : at(Math.round(row.median7d)),
+    immediate: buyer ? at(buyer.platinum) : null,
+    downside5: at(Math.max(0, row.sellAt - 5)),
+    breakEven: row.buyAt,
+  };
+}
+
+export function riskOf(row: Pick<Row, "sellConfidence" | "priceAgeH" | "liveAt" | "trend" | "ghostSweeps" | "expectedMargin">) {
+  let factor = row.sellConfidence === "high" ? 1 : row.sellConfidence === "medium" ? 0.82 : 0.58;
+  const flags: string[] = [];
+  if (row.sellConfidence !== "high") flags.push(`${row.sellConfidence} liquidity evidence`);
+  if (!row.liveAt && row.priceAgeH !== null) {
+    const freshness = Math.max(0.55, 1 - row.priceAgeH / 168);
+    factor *= freshness;
+    if (row.priceAgeH > 12) flags.push(`${Math.round(row.priceAgeH)}h-old book`);
+  }
+  if (row.trend !== null && row.trend < -0.05) {
+    factor *= Math.max(0.65, 1 + row.trend);
+    flags.push(`${Math.round(Math.abs(row.trend) * 100)}% falling trend`);
+  }
+  if (row.ghostSweeps >= 3) {
+    factor *= Math.max(0.65, 1 - Math.min(row.ghostSweeps, 10) * 0.035);
+    flags.push(`cheapest ask persisted ${row.ghostSweeps} sweeps`);
+  }
+  const riskScore = Math.max(0, Math.min(100, Math.round(factor * 100)));
+  return { riskScore, riskAdjustedMargin: Math.round(row.expectedMargin * factor), riskFlags: flags };
 }
 
 interface OrderRow {
@@ -174,7 +232,7 @@ function bestOrderReader(db: Db, now = Date.now()) {
   );
   const cutoff = liveCutoff(now);
   return (itemId: string, variant: string, type: "sell" | "buy") =>
-    stmt.get({ itemId, variant, type, liveCutoff: cutoff }) as OrderRow | undefined;
+    stmt.get({ itemId, variant, type, liveCutoff: cutoff, actionableCutoff: actionableSweepCutoff(now) }) as OrderRow | undefined;
 }
 
 /**
@@ -190,6 +248,8 @@ function setPartsOf(
     .sort((a, b) => a.name.localeCompare(b.name))
     .map<SetPart>((p) => {
       const fills: PartFill[] = (p.fill?.fills ?? []).map((f) => ({
+        orderId: f.order.orderId,
+        stock: Math.max(1, f.order.quantity ?? 1),
         seller: counterparty(
           {
             user_id: f.order.userId,
@@ -296,8 +356,9 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
     // is meaningless — the seller of the set is not who you trade with.
     const input = o.kind === "set" ? setInputs.get(o.itemId) : undefined;
     const parts = input ? setPartsOf(input, stats) : null;
+    const contacts = parts ? new Set(parts.flatMap((p) => p.fills.map((f) => f.seller.userId))).size : 2;
 
-    return {
+    const base = {
       ghostSweeps: sellOrder?.sweeps_at_best ?? 0,
       ...o,
       ...calibrationOf(factors, o.kind, o.margin),
@@ -311,9 +372,13 @@ export function opportunities(db: Db, q: OpportunityQuery = {}): Row[] {
       lowballWhisper:
         o.kind === "spread" && seller ? whisperFor(seller.ingameName, o.name, o.buyAt, "buy") : null,
       parts,
+      contacts,
+      profitPerContact: Number((o.margin / Math.max(1, contacts)).toFixed(1)),
       watched: watched.has(`${o.itemId}|${o.variant}`),
       priceAgeH: priceAgeH === null ? null : Number(priceAgeH.toFixed(2)),
-    };
+      profitScenarios: profitScenariosOf(o, buyer),
+    } satisfies Omit<Row, "riskScore" | "riskAdjustedMargin" | "riskFlags">;
+    return { ...base, ...riskOf(base) };
   });
 
   return q.watchedOnly ? rows.filter((r) => r.watched) : rows;
@@ -435,11 +500,16 @@ export function setArbitrage(db: Db, q: SetQuery = {}): SetComparison {
 export function recentAlerts(db: Db, limit = 50) {
   const rows = db
     .prepare(
-      `SELECT a.*, i.name AS item_name, i.slug AS item_slug,
-              ss.median_7d AS median7d, ss.median_30d AS median30d
+      `SELECT a.*, i.name AS item_name, i.slug AS item_slug, os.user_id,
+              ss.median_7d AS median7d, ss.median_30d AS median30d,
+              af.outcome, af.trade_id, af.note AS feedback_note, af.recorded_at,
+              CASE WHEN t.sold_at IS NOT NULL THEN (t.sell_price - t.buy_price) * t.quantity END AS realised_profit
          FROM alert a
          JOIN item i ON i.id = a.item_id
+         LEFT JOIN order_seen os ON os.order_id = a.order_id
          LEFT JOIN stat_summary ss ON ss.item_id = a.item_id AND ss.variant = a.variant
+         LEFT JOIN alert_feedback af ON af.alert_id = a.id
+         LEFT JOIN trade t ON t.id = af.trade_id
         ORDER BY a.fired_at DESC
         LIMIT ?`,
     )
@@ -496,6 +566,8 @@ export function priceHistory(db: Db, itemId: string, variant = "", days = 90): P
 export interface PlanQuery {
   budget: number;
   maxPerItem: number | null;
+  cashReserve?: number;
+  maxPerGroup?: number | null;
   sortBy?: PlanSort;
   minConfidence?: Confidence;
 }
@@ -505,8 +577,91 @@ export interface PlanQuery {
  * to the platinum you have — with what you already hold counted against each
  * item's limit.
  */
-export function tradePlan(db: Db, q: PlanQuery): Plan<Row> {
-  const candidates = opportunities(db, { limit: 1000 });
+export interface SellerRoute {
+  userId: string;
+  ingameName: string;
+  purchases: Array<{ itemId: string; name: string; units: number; platinum: number; whisper: string }>;
+  totalPlatinum: number;
+}
+
+export type AlertOutcome = "bought" | "already_gone" | "no_reply" | "margin_disappeared";
+
+export function setAlertFeedback(db: Db, alertId: number, outcome: AlertOutcome, tradeId?: number, note?: string): boolean {
+  const exists = db.prepare("SELECT 1 FROM alert WHERE id=?").get(alertId);
+  if (!exists) return false;
+  db.prepare(`INSERT INTO alert_feedback(alert_id,outcome,trade_id,note,recorded_at)
+    VALUES(?,?,?,?,?) ON CONFLICT(alert_id) DO UPDATE SET outcome=excluded.outcome,
+    trade_id=excluded.trade_id,note=excluded.note,recorded_at=excluded.recorded_at`)
+    .run(alertId, outcome, tradeId ?? null, note ?? null, new Date().toISOString());
+  return true;
+}
+
+export function alertPerformance(db: Db) {
+  const r = db.prepare(`SELECT COUNT(*) total, COUNT(af.alert_id) reviewed,
+    SUM(CASE WHEN af.outcome='bought' THEN 1 ELSE 0 END) bought,
+    SUM(CASE WHEN af.outcome='already_gone' THEN 1 ELSE 0 END) alreadyGone,
+    SUM(CASE WHEN af.outcome='no_reply' THEN 1 ELSE 0 END) noReply,
+    SUM(CASE WHEN af.outcome='margin_disappeared' THEN 1 ELSE 0 END) marginDisappeared,
+    SUM(CASE WHEN t.sold_at IS NOT NULL THEN (t.sell_price-t.buy_price)*t.quantity ELSE 0 END) realisedProfit
+    FROM alert a LEFT JOIN alert_feedback af ON af.alert_id=a.id LEFT JOIN trade t ON t.id=af.trade_id`).get() as Record<string, number>;
+  const reviewed = Number(r.reviewed ?? 0), bought = Number(r.bought ?? 0);
+  const recommendations: string[] = [];
+  if (reviewed >= 5) {
+    if (Number(r.alreadyGone ?? 0) / reviewed > 0.35) recommendations.push("Too many listings are gone: shorten the polling interval.");
+    if (Number(r.noReply ?? 0) / reviewed > 0.35) recommendations.push("Seller response is weak: favour in-game sellers and higher reply-rate accounts.");
+    if (Number(r.marginDisappeared ?? 0) / reviewed > 0.2) recommendations.push("Margins often vanish: tighten the sell discount and raise minimum profit.");
+    if (bought >= 3 && Number(r.realisedProfit ?? 0) <= 0) recommendations.push("Completed alert trades are not profitable: raise the minimum-profit threshold.");
+  }
+  return { ...r, total: Number(r.total ?? 0), reviewed, bought,
+    conversionRate: reviewed ? bought / reviewed : null, realisedProfit: Number(r.realisedProfit ?? 0), recommendations };
+}
+
+export type TradePlan = Plan<Row> & { sellerRoutes: SellerRoute[]; routePurchases: number };
+
+export function sellerRoutesOf(picks: Row[]): SellerRoute[] {
+  const routes = new Map<string, SellerRoute>();
+  for (const pick of picks) {
+    for (const part of pick.parts ?? []) {
+      for (const fill of part.fills) {
+        const route = routes.get(fill.seller.userId) ?? {
+          userId: fill.seller.userId,
+          ingameName: fill.seller.ingameName,
+          purchases: [],
+          totalPlatinum: 0,
+        };
+        route.purchases.push({
+          itemId: part.itemId, name: part.name, units: fill.units,
+          platinum: fill.platinum, whisper: fill.whisper,
+        });
+        route.totalPlatinum += fill.units * fill.platinum;
+        routes.set(route.userId, route);
+      }
+    }
+  }
+  return [...routes.values()].sort((a, b) => b.purchases.length - a.purchases.length || b.totalPlatinum - a.totalPlatinum);
+}
+
+export function tradePlan(db: Db, q: PlanQuery): TradePlan {
+  const groupByItem = new Map((db.prepare("SELECT id, tags FROM item").all() as Array<{id:string;tags:string}>).map((row) => {
+    let tags: string[] = []; try { tags = JSON.parse(row.tags) as string[]; } catch {}
+    const group = ["warframe", "weapon", "mod", "arcane_enhancement", "relic", "companion"].find((tag) => tags.includes(tag)) ?? "other";
+    return [row.id, group] as const;
+  }));
+  const candidates = opportunities(db, { limit: 1000 }).map((candidate) => {
+    const resources: Record<string, number> = {};
+    for (const part of candidate.parts ?? []) {
+      for (const fill of part.fills) {
+        resources[fill.orderId] = (resources[fill.orderId] ?? 0) + fill.units;
+      }
+    }
+    return { ...candidate, resources, group: groupByItem.get(candidate.itemId) ?? "other" };
+  });
+  const resourceCapacity = new Map<string, number>();
+  for (const candidate of candidates) {
+    for (const part of candidate.parts ?? []) {
+      for (const fill of part.fills) resourceCapacity.set(fill.orderId, fill.stock);
+    }
+  }
   const held = new Map(
     (
       db
@@ -517,13 +672,18 @@ export function tradePlan(db: Db, q: PlanQuery): Plan<Row> {
         .all() as Array<{ itemId: string; variant: string; tied: number }>
     ).map((h) => [keyOf(h), h.tied]),
   );
-  return planTrades(candidates, {
+  const plan = planTrades(candidates, {
     budget: q.budget,
     maxPerItem: q.maxPerItem,
     sortBy: q.sortBy ?? "speed",
     minConfidence: q.minConfidence ?? "medium",
     held,
+    resourceCapacity,
+    cashReserve: q.cashReserve ?? 0,
+    maxPerGroup: q.maxPerGroup ?? null,
   });
+  const sellerRoutes = sellerRoutesOf(plan.picks);
+  return { ...plan, sellerRoutes, routePurchases: sellerRoutes.reduce((n, r) => n + r.purchases.length, 0) };
 }
 
 export function status(db: Db) {
@@ -535,6 +695,7 @@ export function status(db: Db) {
 
   const count = (sql: string) => (db.prepare(sql).get() as { c: number }).c;
 
+  const jobs = schedulerHealth(db);
   return {
     sweepId: sweep?.id ?? null,
     sweptAt: sweep?.finished_at ?? null,
@@ -545,6 +706,22 @@ export function status(db: Db) {
       : 0,
     ordersTracked: count("SELECT COUNT(*) c FROM order_seen"),
     alerts: count("SELECT COUNT(*) c FROM alert"),
+    jobs,
+    failingJobs: jobs.filter((j) => j.consecutiveFailures > 0).length,
+    backup: {
+      lastSuccess: getMeta(db, "backup:lastSuccess"),
+      path: getMeta(db, "backup:lastPath"),
+      bytes: Number(getMeta(db, "backup:lastBytes") ?? 0) || null,
+    },
+    livePoll: { lastSuccess: getMeta(db, "watch:lastSuccess"), lastError: getMeta(db, "watch:lastError") },
+    notifications: ["toast", "discord"].map((name) => ({
+      name,
+      configured: name === "toast" || getMeta(db, "notify:discord:configured") === "1",
+      lastAttempt: getMeta(db, `notify:${name}:lastAttempt`),
+      lastSuccess: getMeta(db, `notify:${name}:lastSuccess`),
+      lastError: getMeta(db, `notify:${name}:lastError`),
+      pending: name === "discord" ? count("SELECT COUNT(*) c FROM notification_outbox") : 0,
+    })),
     whispers: count("SELECT COUNT(*) c FROM whisper_log"),
     watched: count("SELECT COUNT(*) c FROM watchlist"),
   };
@@ -575,8 +752,8 @@ export function resolveWhisper(
   db: Db,
   id: number,
   outcome: { replied?: boolean; traded?: boolean },
-): void {
-  db.prepare(
+): boolean {
+  return db.prepare(
     `UPDATE whisper_log
         SET replied = COALESCE(@replied, replied),
             traded  = COALESCE(@traded, traded)
@@ -585,7 +762,7 @@ export function resolveWhisper(
     id,
     replied: outcome.replied === undefined ? null : outcome.replied ? 1 : 0,
     traded: outcome.traded === undefined ? null : outcome.traded ? 1 : 0,
-  });
+  }).changes > 0;
 }
 
 export function pendingWhispers(db: Db, limit = 30) {

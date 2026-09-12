@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, type Db } from "../db/index";
 import { upsertCatalog } from "../db/repo";
-import { closeTrade, listTrades, openTrade, pnl } from "./journal";
+import { closeTrade, correctTrade, decideSellAction, listTrades, openTrade, pnl, strategyCalibration, tradeAudit } from "./journal";
+import type { SellAdvice } from "../rank/sell";
 import type { WfmItemSummary } from "../wfm/types";
 
 const item = (id: string, slug: string): WfmItemSummary => ({
@@ -43,6 +44,7 @@ test("an open position records cost but no profit yet", () => {
   assert.equal(p.openCount, 1);
   assert.equal(p.openCost, 90, "45 x 2 tied up");
   assert.equal(p.openMarkToMarket, 50, "(70 - 45) x 2, unrealised");
+  assert.equal(p.openMarketValue, 140, "current ask x quantity");
   assert.equal(p.realised, 0);
   db.close();
 });
@@ -60,6 +62,9 @@ test("closing a position realises profit per unit", () => {
   assert.equal(p.realised, 60);
   assert.equal(p.openCost, 0, "the position is no longer tying up platinum");
   assert.equal(p.closedCount, 1);
+  assert.equal(p.capitalReturn, 60 / 135);
+  assert.equal(p.realised7d, 60);
+  assert.equal(p.realised30d, 60);
   db.close();
 });
 
@@ -126,6 +131,123 @@ test("calibration is per unit, so a bulk trade does not skew it", () => {
   assert.equal(spread.actual, 20, "200p over ten units is 20p a unit, not 200");
   assert.equal(spread.ratio, 1);
   db.close();
+});
+
+const advice = (overrides: Partial<SellAdvice> = {}): SellAdvice => ({
+  itemId: "rhino", variant: "", lowestAsk: 70, queueAtFair: 0,
+  tradedMedian: 72, tradedLow: 65, tradedHigh: 80, dailyVolume: 5,
+  daysOfHistory: 14, quickPrice: 69, fairPrice: 69, patientPrice: 80,
+  estimatedDaysAtFair: 0.2, bookAboveMarket: false, ...overrides,
+});
+
+test("sell manager prioritises an actionable buyer over repricing", () => {
+  const action = decideSellAction(
+    { buyPrice: 45, targetPrice: 65, heldH: 12 }, advice(),
+    [
+      { kind: "undercut", label: "Undercut", detail: "one below", value: 60 },
+      { kind: "target_bid", label: "Sell now", detail: "buyer bids 66p", value: 66 },
+    ],
+  );
+  assert.equal(action.kind, "sell_now");
+  assert.equal(action.price, 66);
+});
+
+test("sell manager does not chase an ask far below the trading range", () => {
+  const action = decideSellAction(
+    { buyPrice: 45, targetPrice: 65, heldH: 12 },
+    advice({ quickPrice: 49, lowestAsk: 50 }),
+    [{ kind: "undercut", label: "Undercut", detail: "one below", value: 50 }],
+  );
+  assert.equal(action.kind, "hold");
+  assert.equal(action.price, 65);
+});
+
+test("sell manager recommends freeing stale capital", () => {
+  const action = decideSellAction(
+    { buyPrice: 45, targetPrice: 75, heldH: 120 }, advice(),
+    [{ kind: "stale", label: "Sitting", detail: "held 5d", value: null }],
+  );
+  assert.equal(action.kind, "review");
+  assert.equal(action.price, 69);
+});
+
+test("a partial sale realises only those units and leaves the rest open", () => {
+  const db = seeded();
+  const id = openTrade(db, {
+    itemId: "rhino", buyPrice: 45, quantity: 5, expectedSell: 65,
+    expectedMargin: 20, targetPrice: 65, source: "spread",
+  });
+  assert.equal(closeTrade(db, id, { sellPrice: 60, quantity: 2, soldTo: "Buyer" }), true);
+  const rows = listTrades(db);
+  const open = rows.find((t) => t.profit === null)!;
+  const sold = rows.find((t) => t.profit !== null)!;
+  assert.equal(open.id, id);
+  assert.equal(open.quantity, 3);
+  assert.equal(open.targetPrice, 65);
+  assert.equal(sold.quantity, 2);
+  assert.equal(sold.profit, 30);
+  assert.equal(sold.soldTo, "Buyer");
+  const totals = pnl(db);
+  assert.equal(totals.realised, 30);
+  assert.equal(totals.openCost, 135);
+  db.close();
+});
+
+test("buy fill timing and inventory corrections remain auditable", () => {
+  const db = seeded();
+  const id = openTrade(db, { itemId: "rhino", buyPrice: 45, quantity: 2, buyWaitH: 6 });
+  assert.equal(correctTrade(db, id, { quantity: 3, buyPrice: 44, note: "counted inventory" }), true);
+  assert.equal(listTrades(db)[0]!.buyWaitH, 6);
+  assert.equal(pnl(db).averageBuyWaitH, 6);
+  assert.equal(pnl(db).buyWaitSamples, 1);
+  assert.deepEqual(tradeAudit(db, id).map((event: { action: string }) => event.action), ["corrected", "opened"]);
+  db.close();
+});
+
+test("a partial sale rejects zero, fractional, and excessive quantities", () => {
+  const db = seeded();
+  const id = openTrade(db, { itemId: "rhino", buyPrice: 45, quantity: 3 });
+  for (const quantity of [0, 1.5, 4]) {
+    assert.throws(() => closeTrade(db, id, { sellPrice: 60, quantity }), RangeError);
+  }
+  assert.equal(listTrades(db)[0]!.quantity, 3);
+  db.close();
+});
+
+test("unpredicted wins and losses affect P&L but not strategy calibration", () => {
+  const db = seeded();
+  try {
+    const measured = openTrade(db, {
+      itemId: "rhino", buyPrice: 10, expectedMargin: 10, source: "spread",
+    });
+    closeTrade(db, measured, { sellPrice: 20 });
+    for (const sale of [110, 0]) {
+      const id = openTrade(db, { itemId: "rhino", buyPrice: 10, source: "spread" });
+      closeTrade(db, id, { sellPrice: sale });
+      const report = pnl(db).bySource.find((c) => c.source === "spread")!;
+      assert.equal(report.expected, 10);
+      assert.equal(report.actual, 10);
+      assert.equal(report.ratio, 1);
+      assert.equal(strategyCalibration(db).get("spread")!.factor, 1);
+      assert.match(report.note, /1 closed spread trade realised 100%/);
+    }
+    assert.equal(pnl(db).realised, 100);
+    assert.equal(pnl(db).closedCount, 3);
+  } finally { db.close(); }
+});
+
+test("a strategy without predicted trades has no calibration evidence", () => {
+  const db = seeded();
+  try {
+    const id = openTrade(db, { itemId: "rhino", buyPrice: 10, source: "spread" });
+    closeTrade(db, id, { sellPrice: 110 });
+    const report = pnl(db).bySource[0]!;
+    assert.equal(report.expected, null);
+    assert.equal(report.actual, null);
+    assert.equal(report.ratio, null);
+    assert.equal(report.factor, 1);
+    assert.equal(pnl(db).realised, 100);
+  } finally { db.close(); }
 });
 
 test("open positions sort ahead of closed ones", () => {

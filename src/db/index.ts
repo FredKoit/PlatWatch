@@ -59,8 +59,20 @@ export function startSweep(
   return Number(info.lastInsertRowid);
 }
 
-export function finishSweep(db: Db, id: number, ok: number, failed: number): void {
+/**
+ * Close a sweep. `scope` demotes a sweep that ran to the end but covered too
+ * little of the market to be the baseline — see sweepTopOrders.
+ */
+export function finishSweep(
+  db: Db,
+  id: number,
+  ok: number,
+  failed: number,
+  scope?: SweepScope,
+): void {
   db.prepare(
-    "UPDATE sweep SET finished_at = ?, items_ok = ?, items_failed = ? WHERE id = ?",
-  ).run(new Date().toISOString(), ok, failed, id);
+    `UPDATE sweep SET finished_at = ?, items_ok = ?, items_failed = ?,
+                      scope = COALESCE(?, scope)
+      WHERE id = ?`,
+  ).run(new Date().toISOString(), ok, failed, scope ?? null, id);
 }

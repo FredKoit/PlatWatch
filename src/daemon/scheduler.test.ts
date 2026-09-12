@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../db/index";
-import { isDue, lastRun, markRun, runScheduler, type Job } from "./scheduler";
+import { isDue, lastRun, markRun, runScheduler, schedulerHealth, type Job } from "./scheduler";
 
 const NOW = Date.parse("2026-09-10T12:00:00Z");
 const HOUR = 3_600_000;
@@ -208,4 +208,43 @@ test("a job that waits for its first interval does eventually run", async () => 
     await loop;
     db.close();
   }
+});
+
+test("a job can ask to run again sooner than its interval", async () => {
+  // A sweep cut short by an outage resumes when the market is back, not six
+  // hours later — by resolving { retryInMs }.
+  const db = openDb(":memory:");
+  const controller = new AbortController();
+  let runs = 0;
+  const loop = runScheduler(
+    db,
+    [{ name: "sweep", everyMs: HOUR, run: async () => (++runs === 1 ? { retryInMs: 20 } : undefined) }],
+    { signal: controller.signal, tickMs: 5 },
+  );
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(runs, 2, "retried once, soon; then back on the hourly interval");
+  } finally {
+    controller.abort();
+    await loop;
+    db.close();
+  }
+});
+
+test("failures record health and retry sooner with bounded backoff", async () => {
+  const db = openDb(":memory:");
+  const controller = new AbortController();
+  let runs = 0;
+  const loop = runScheduler(db, [{
+    name: "recovering", everyMs: HOUR, errorRetryMs: 20,
+    run: async () => { runs++; throw new Error("temporary outage"); },
+  }], { signal: controller.signal, tickMs: 5 });
+  try {
+    await new Promise((r) => setTimeout(r, 90));
+    assert.ok(runs >= 2 && runs <= 4, `bounded retries, got ${runs}`);
+    const health = schedulerHealth(db).find((j) => j.name === "recovering")!;
+    assert.equal(health.lastSuccess, null);
+    assert.equal(health.lastError, "temporary outage");
+    assert.equal(health.consecutiveFailures, runs);
+  } finally { controller.abort(); await loop; db.close(); }
 });

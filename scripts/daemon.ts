@@ -15,9 +15,9 @@
  * a small volunteer-run service. Here every job shares one limiter, and
  * PRIORITY keeps the live poll ahead of a 22-minute crawl.
  *
- * Set DISCORD_WEBHOOK_URL to push alerts to a phone.
+ * Set PLATWATCH_DISCORD_WEBHOOK_URL to push alerts to a phone.
  */
-import { openDb, startSweep } from "../src/db/index";
+import { DEFAULT_DB_PATH, openDb, setMeta, startSweep } from "../src/db/index";
 import { rotatingWriter } from "../src/daemon/logfile";
 import { applyRetention, RETENTION_DAYS } from "../src/db/retention";
 import { PRIORITY } from "../src/wfm/limiter";
@@ -43,6 +43,9 @@ import {
   type Sink,
 } from "../src/live/notify";
 import { evaluatePositions, exitNotice, openPositions, unsentSignals } from "../src/trade/exits";
+import { deliverPending, queueDelivery, type Delivery } from "../src/live/outbox";
+import { applyPendingRestore, backupDatabase, stageRestore } from "../src/db/backup";
+import { appSettings, alertPolicy } from "../src/config/settings";
 
 const args = process.argv.slice(2);
 const flag = (n: string): string | null => {
@@ -78,12 +81,30 @@ if (logFile) {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
+const restoredFrom = applyPendingRestore(DEFAULT_DB_PATH);
 const db = openDb();
 const controller = new AbortController();
 const port = Number(flag("port") ?? 5173);
 
 const log = (scope: string, msg: string) =>
   console.log(`${new Date().toLocaleTimeString()} [${scope}] ${msg}`);
+if (restoredFrom) log("restore", `restored ${restoredFrom}`);
+
+function trackedSink(sink: Sink): Sink {
+  const mark = async (kind: "send" | "notify", value: Parameters<Sink["send"]>[0] | Parameters<NonNullable<Sink["notify"]>>[0]) => {
+    setMeta(db, `notify:${sink.name}:lastAttempt`, new Date().toISOString());
+    try {
+      if (kind === "send") await sink.send(value as Parameters<Sink["send"]>[0]);
+      else if (sink.notify) await sink.notify(value as Parameters<NonNullable<Sink["notify"]>>[0]);
+      setMeta(db, `notify:${sink.name}:lastSuccess`, new Date().toISOString());
+      setMeta(db, `notify:${sink.name}:lastError`, "");
+    } catch (error) {
+      setMeta(db, `notify:${sink.name}:lastError`, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  };
+  return { name: sink.name, send: (a) => mark("send", a), ...(sink.notify ? { notify: (n) => mark("notify", n) } : {}) };
+}
 
 // ── where alerts go ─────────────────────────────────────────────────────────
 // Shared by the sniper and the exit check, so a signal on something you hold
@@ -92,15 +113,46 @@ const sinks: Sink[] = [consoleSink];
 // Toasts are the channel that works unattended. Run from Task Scheduler the
 // console is a log file, so without this every alert went unseen.
 if (process.platform === "win32" && !has("no-toast")) {
-  sinks.push(toastSink({ url: `http://127.0.0.1:${port}` }));
+  sinks.push(trackedSink(toastSink({ url: `http://127.0.0.1:${port}` })));
 }
-const webhook = process.env["DISCORD_WEBHOOK_URL"];
-if (webhook) sinks.push(discordSink(webhook));
+const discordNow = () => {
+  const webhook = appSettings(db).discordWebhook || process.env["PLATWATCH_DISCORD_WEBHOOK_URL"];
+  setMeta(db, "notify:discord:configured", webhook ? "1" : "0");
+  return webhook ? discordSink(webhook) : null;
+};
 const notice = fanOutNotices(sinks);
+const sendAlert = fanOut(sinks);
+
+async function queueDiscord(key: string, delivery: Delivery): Promise<void> {
+  const discord = discordNow(); if (!discord) return;
+  queueDelivery(db, key, delivery);
+  const result = await deliverPending(db, discord, Date.now(), 1);
+  if (result.failed) log("discord", `delivery failed; ${result.pending} message(s) queued for retry`);
+}
 
 // ── jobs ────────────────────────────────────────────────────────────────────
 
 const jobs: Job[] = [
+  {
+    name: "backup",
+    group: "maintenance",
+    everyMs: 24 * HOUR,
+    async run() {
+      const result = await backupDatabase(db);
+      log("backup", `${(result.bytes / 1_048_576).toFixed(1)} MB saved · kept latest 7${result.removed ? ` · removed ${result.removed} old` : ""}`);
+    },
+  },
+  {
+    name: "notifications",
+    everyMs: 1 * MINUTE,
+    async run() {
+      const discord = discordNow(); if (!discord) return "idle";
+      const result = await deliverPending(db, discord);
+      if (result.delivered) log("discord", `delivered ${result.delivered} queued message(s)`);
+      if (result.failed) log("discord", `${result.failed} delivery attempt(s) failed; ${result.pending} queued`);
+      return result.delivered || result.failed ? undefined : "idle";
+    },
+  },
   {
     name: "catalog",
     group: "bulk",
@@ -141,14 +193,19 @@ const jobs: Job[] = [
       // Resume a sweep the last run left unfinished rather than discarding
       // twenty minutes of work. sweepTopOrders skips items already recorded
       // under that id, so this costs only what is still missing.
+      //
+      // The cutoff is an ISO string like started_at itself. It used to be
+      // SQLite's datetime(), whose "2026-09-11 13:30" sorts below every
+      // "2026-09-11T..." — so any sweep started earlier the same UTC day
+      // counted as recent, however old.
       const open = db
         .prepare(
           `SELECT id FROM sweep
             WHERE kind = 'top' AND scope = 'full' AND finished_at IS NULL
-              AND started_at > datetime('now', '-6 hours')
+              AND started_at > ?
             ORDER BY id DESC LIMIT 1`,
         )
-        .get() as { id: number } | undefined;
+        .get(new Date(Date.now() - 6 * HOUR).toISOString()) as { id: number } | undefined;
       const sweepId = open?.id ?? startSweep(db, "top");
       if (open) log("sweep", `resuming #${sweepId}`);
 
@@ -163,6 +220,23 @@ const jobs: Job[] = [
           `${(result.elapsedMs / 60000).toFixed(1)} min` +
           (result.interrupted ? " (interrupted)" : ""),
       );
+      if (result.stoppedBy === "unreachable") {
+        // The previous sweep stays the baseline; this one stays open and the
+        // retry resumes it rather than starting over.
+        log(
+          "sweep",
+          `warframe.market is not answering — stopped rather than record an empty market; ` +
+            `sweep #${latestSweepId(db) ?? "none"} stays the baseline, resuming in 30 min`,
+        );
+        return { retryInMs: 30 * MINUTE };
+      }
+      if (result.partial) {
+        log(
+          "sweep",
+          `#${result.sweepId} fetched only ${Math.round((result.ok / items.length) * 100)}% of the market — ` +
+            `kept as partial, not used as the baseline`,
+        );
+      }
     },
   },
   {
@@ -224,7 +298,12 @@ const jobs: Job[] = [
       if (fresh.length === 0) return "idle";
       const names = new Map(positions.map((p) => [p.tradeId, p.name]));
       for (const { tradeId, signal } of fresh) {
-        await notice(exitNotice(names.get(tradeId) ?? "position", signal));
+        const message = exitNotice(names.get(tradeId) ?? "position", signal);
+        await notice(message);
+        await queueDiscord(
+          `exit:${tradeId}:${signal.kind}:${signal.value ?? "none"}`,
+          { kind: "notice", payload: message },
+        );
       }
       log("exits", `${fresh.length} new signal(s) on ${new Set(fresh.map((f) => f.tradeId)).size} position(s)`);
     },
@@ -244,17 +323,24 @@ async function runWatcher(): Promise<void> {
 
   log(
     "watch",
-    `live sniper on sweep #${latestSweepId(db)} · sinks: ${sinks.map((s) => s.name).join(", ")}`,
+    `live sniper on sweep #${latestSweepId(db)} · sinks: ${[
+      ...sinks.map((s) => s.name), ...(discordNow() ? ["discord"] : []),
+    ].join(", ")}`,
   );
 
   const stats = await watch(db, {
     // No fixed sweep id: the baseline follows each new sweep as it completes.
     onBaselineChange: (id) => log("watch", `baseline moved to sweep #${id}`),
-    pollMs: Number(flag("poll") ?? 90) * 1000,
-    policy: DEFAULT_ALERT_POLICY,
+    pollMs: () => Number(flag("poll") ?? appSettings(db).pollSeconds) * 1000,
+    policy: () => alertPolicy(db),
     signal: controller.signal,
-    onAlert: fanOut(sinks),
+    onAlert: async (alert) => {
+      await sendAlert(alert);
+      await queueDiscord(`alert:${alert.orderId}`, { kind: "alert", payload: alert });
+    },
     onPoll: (batch, running) => {
+      setMeta(db, "watch:lastSuccess", new Date().toISOString());
+      setMeta(db, "watch:lastError", "");
       if (batch.alerts > 0 || running.polls % 10 === 0) {
         log(
           "watch",
@@ -263,14 +349,26 @@ async function runWatcher(): Promise<void> {
         );
       }
     },
-    onError: (err) => log("watch", `poll failed: ${err instanceof Error ? err.message : err}`),
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      setMeta(db, "watch:lastError", message);
+      log("watch", `poll failed: ${message}`);
+    },
   });
   log("watch", `stopped after ${stats.polls} polls, ${stats.alerts} alerts`);
 }
 
 // ── wire up ─────────────────────────────────────────────────────────────────
 
-const server = createApp(db);
+const server = createApp(db, { testNotification: async (message) => {
+  await notice(message);
+  const discord = discordNow();
+  if (discord?.notify) await discord.notify(message);
+}, restoreBackup: async (name) => {
+  await backupDatabase(db);
+  await stageRestore(name);
+  setTimeout(() => { server.close(); db.close(); process.exit(1); }, 250);
+} });
 let scheduler: Promise<void> = Promise.resolve();
 let watcher: Promise<void> = Promise.resolve();
 

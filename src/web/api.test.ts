@@ -6,7 +6,9 @@ import {
   logWhisper,
   opportunities,
   pendingWhispers,
+  profitScenariosOf,
   resolveWhisper,
+  riskOf,
   sellerStats,
   priceHistory,
   setArbitrage,
@@ -17,6 +19,9 @@ import {
 } from "./api";
 import { closeTrade, listTrades, openTrade, setTradeTarget } from "../trade/journal";
 import { evaluatePositions, openPositions, unsentSignals } from "../trade/exits";
+import { bookReader } from "../rank/depth";
+import { LIVE_WINDOW_MS } from "../live/book";
+import { ACTIONABLE_SWEEP_WINDOW_MS } from "../rank/depth";
 import type { WfmItemSummary } from "../wfm/types";
 
 const item = (id: string, slug: string, tags: string[] = []): WfmItemSummary => ({
@@ -65,6 +70,31 @@ function seeded(): Db {
   order("buy-high", "buy", 45, "TopBidder");
   return db;
 }
+
+test("top-of-book observations expire for sellers and exit buyers, and recover on refresh", () => {
+  const db = seeded();
+  try {
+    const now = Date.now();
+    const fresh = new Date(now - ACTIONABLE_SWEEP_WINDOW_MS + 1).toISOString();
+    const expired = new Date(now - ACTIONABLE_SWEEP_WINDOW_MS).toISOString();
+    db.prepare("UPDATE order_seen SET last_seen = ?").run(fresh);
+    assert.equal(bookReader(db, now)("rhino", "", "sell").length, 2);
+    assert.equal(bookReader(db, now)("rhino", "", "buy").length, 1);
+    const positions = [{ tradeId: 1, itemId: "rhino", variant: "", name: "rhino",
+      quantity: 1, target: 40, heldH: 0 }];
+    assert.ok(evaluatePositions(db, positions, now).get(1)!.some((s) => s.kind === "target_bid"));
+
+    db.prepare("UPDATE order_seen SET last_seen = ?").run(expired);
+    assert.equal(bookReader(db, now)("rhino", "", "sell").length, 0);
+    assert.equal(bookReader(db, now)("rhino", "", "buy").length, 0);
+    assert.equal(evaluatePositions(db, positions, now).get(1)!.length, 0);
+    assert.equal(opportunities(db)[0]!.seller, null, "no whisper to an expired seller");
+
+    db.prepare("UPDATE order_seen SET last_seen = ?").run(new Date(now).toISOString());
+    assert.equal(bookReader(db, now)("rhino", "", "sell").length, 2);
+    assert.ok(opportunities(db)[0]!.seller, "a fresh observation restores the seller");
+  } finally { db.close(); }
+});
 
 test("a spread is executed by posting orders, not by paying the ask", () => {
   const db = seeded();
@@ -498,6 +528,22 @@ test("a set whose parts cannot be bought in full is held back as short, not pric
   db.close();
 });
 
+test("an expired component prevents a set from being offered or planned until refreshed", () => {
+  const db = setsDb([
+    { id: "kamas", ask: 150, traded: 150, parts: [{ id: "blade", qty: 1, ask: 30 }] },
+  ]);
+  try {
+    assert.equal(setArbitrage(db).rows.length, 1);
+    db.prepare("UPDATE order_seen SET last_seen = ? WHERE item_id != 'kamas'")
+      .run(new Date(Date.now() - ACTIONABLE_SWEEP_WINDOW_MS - 1000).toISOString());
+    assert.equal(setArbitrage(db).rows.length, 0);
+    assert.equal(tradePlan(db, { budget: 500, maxPerItem: null }).picks
+      .filter((p) => p.kind === "set").length, 0);
+    db.prepare("UPDATE order_seen SET last_seen = ?").run(new Date().toISOString());
+    assert.equal(setArbitrage(db).rows.length, 1);
+  } finally { db.close(); }
+});
+
 test("an offline seller, or a feed sighting past its window, is neither priced nor offered", () => {
   // Cheaper asks exist, but one owner is offline and the other was only seen
   // on the feed an hour ago — the kind of row that used to be offered.
@@ -538,7 +584,39 @@ test("the plan fits the ranked trades to your budget, one per item, within the p
   assert.equal(p.spent, 90);
   assert.equal(p.skipped.overCap, 1, "the 200p set breaks the per-item limit");
   assert.ok(p.picks[0]!.parts, "picks are full rows: the shopping list comes with them");
+  assert.equal(p.routePurchases, 2);
+  assert.equal(p.sellerRoutes.length, 2, "the two selected sets become two seller visits");
+  assert.equal(p.sellerRoutes.reduce((n, r) => n + r.totalPlatinum, 0), p.spent);
   db.close();
+});
+
+test("risk score discounts weak, old, falling markets with persistent asks", () => {
+  const strong = riskOf({
+    sellConfidence: "high", priceAgeH: 0, liveAt: nowIso, trend: 0.05,
+    ghostSweeps: 0, expectedMargin: 40,
+  });
+  const weak = riskOf({
+    sellConfidence: "low", priceAgeH: 48, liveAt: null, trend: -0.2,
+    ghostSweeps: 6, expectedMargin: 40,
+  });
+  assert.deepEqual(strong, { riskScore: 100, riskAdjustedMargin: 40, riskFlags: [] });
+  assert.ok(weak.riskScore < 40, `weak market scored ${weak.riskScore}`);
+  assert.ok(weak.riskAdjustedMargin < 16);
+  assert.equal(weak.riskFlags.length, 4);
+});
+
+test("profit scenarios separate listing, historical, immediate, and downside exits", () => {
+  const scenarios = profitScenariosOf(
+    { buyAt: 60, sellAt: 90, median7d: 82 },
+    { userId: "b", ingameName: "Buyer", platinum: 70, sent: 0, replied: 0, replyRate: null },
+  );
+  assert.deepEqual(scenarios, {
+    proposed: { sellAt: 90, profit: 30 },
+    historical: { sellAt: 82, profit: 22 },
+    immediate: { sellAt: 70, profit: 10 },
+    downside5: { sellAt: 85, profit: 25 },
+    breakEven: 60,
+  });
 });
 
 test("the plan counts what you already hold against an item's limit", () => {

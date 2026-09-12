@@ -192,6 +192,14 @@ CREATE TABLE IF NOT EXISTS alert (
 CREATE UNIQUE INDEX IF NOT EXISTS alert_order_kind ON alert(order_id, kind);
 CREATE INDEX IF NOT EXISTS alert_fired ON alert(fired_at DESC);
 
+CREATE TABLE IF NOT EXISTS alert_feedback (
+  alert_id    INTEGER PRIMARY KEY REFERENCES alert(id) ON DELETE CASCADE,
+  outcome     TEXT NOT NULL CHECK (outcome IN ('bought','already_gone','no_reply','margin_disappeared')),
+  trade_id    INTEGER REFERENCES trade(id) ON DELETE SET NULL,
+  note        TEXT,
+  recorded_at TEXT NOT NULL
+);
+
 -- Items you are actively trading. These get re-polled far more often than the
 -- nightly sweep, because a price from last night is a hypothesis, not a quote.
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -253,9 +261,21 @@ CREATE TABLE IF NOT EXISTS trade (
   -- expected_sell. Kept apart from expected_sell, which is the prediction the
   -- calibration table measures and must not move once recorded.
   target_price   INTEGER
+  ,buy_wait_h    REAL
 );
 CREATE INDEX IF NOT EXISTS trade_open ON trade(sold_at) WHERE sold_at IS NULL;
 CREATE INDEX IF NOT EXISTS trade_item ON trade(item_id, variant);
+
+CREATE TABLE IF NOT EXISTS trade_audit (
+  id INTEGER PRIMARY KEY,
+  trade_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  before_json TEXT,
+  after_json TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trade_audit_trade ON trade_audit(trade_id, created_at DESC);
 
 -- Exit signals already sent for an open position, so a check every five
 -- minutes does not repeat itself. `value` is the level it fired at — the bid,
@@ -268,3 +288,17 @@ CREATE TABLE IF NOT EXISTS exit_alert (
   fired_at  TEXT NOT NULL,
   PRIMARY KEY (trade_id, kind)
 );
+
+-- Durable Discord delivery. Rows disappear only after Discord accepts them;
+-- restarts and temporary network failures therefore cannot swallow an alert.
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id              INTEGER PRIMARY KEY,
+  dedupe_key      TEXT NOT NULL UNIQUE,
+  kind            TEXT NOT NULL CHECK (kind IN ('alert','notice')),
+  payload         TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS notification_outbox_due ON notification_outbox(next_attempt_at);

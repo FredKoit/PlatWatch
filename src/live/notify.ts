@@ -161,7 +161,7 @@ function showToast(content: { title: string; body: string }, url: string): void 
 }
 
 /**
- * Discord webhook. Set DISCORD_WEBHOOK_URL to enable.
+ * Discord webhook. Set PLATWATCH_DISCORD_WEBHOOK_URL to enable.
  *
  * The whisper goes in a fenced block so it can be copied on a phone in one tap.
  */
