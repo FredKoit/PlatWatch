@@ -14,6 +14,7 @@
 <header>
   <div class="brand"><span class="brand-mark" aria-hidden="true">⌁</span><div><h1>PlatWatch</h1><div class="brand-sub">Market intelligence</div></div></div>
   <span id="stale" role="status"></span>
+  <span id="sweep-status" role="status"></span>
   <span class="platform">WARFRAME / PC</span>
 </header>
 <div class="metrics" aria-label="Market overview">
@@ -44,7 +45,7 @@
 <div id="toasts" role="status" aria-live="polite"></div>
 
 <section id="tab-today">
-  <div class="bar"><button class="act" id="today-refresh">refresh</button><span class="stat" id="today-count"></span>
+  <div class="bar"><button class="act" data-refresh id="today-refresh">refresh</button><span class="stat" id="today-count"></span>
     <button class="act" id="backup-now">back up now</button>
     <a class="act" href="/api/export/trades">export trades</a><a class="act" href="/api/export/whispers">export whispers</a><a class="act" href="/api/export/alerts">export alerts</a>
   </div>
@@ -71,21 +72,19 @@
       <input type="number" id="capital" min="0" step="10" placeholder="any">
       <span class="unit">p per trade</span>
     </label>
-    <button class="act" id="refresh">refresh</button>
+    <button class="act" data-refresh id="refresh">refresh</button>
   </div>
   <p class="hint">
-    Prices come from the last full sweep unless marked <span class="live">live</span>, which means
-    the feed refreshed them within the last 15 minutes. Treat the rest as a hypothesis and confirm in game.
-    A <span class="ghost">ghost</span> tag means that ask has been cheapest for several sweeps without selling.
-    <b>Spread</b> rows say <span class="play">post <b>46</b> / <b>59</b></span> — place both orders and wait;
-    the offer button lowballs the cheapest seller at your buy price rather than paying their ask.
-    <b>Set</b> rows list the components to buy. Copying any whisper logs it, which builds the reply-rate column.
-    <b>Sells in</b> is how long the platinum stays out — for a spread, your bid filling and then your ask
-    selling — with how far the trade history backs it (hover for the numbers). A <span class="tag warn" style="margin-left:0">▼ 30d</span>
-    tag means the item trades lower this week than over the month. Once you have closed trades, profit shows
-    what your own record says the strategy really makes. An item name opens its warframe.market page in a new tab,
-    to confirm the listing or market is still there before trading; <b>history</b> beside it shows the price history.
-    Click a header to sort.
+    Prices are from the last sweep unless marked <span class="live">live</span> (refreshed in the last 15
+    minutes) — treat the rest as a hypothesis and confirm in game. <span class="ghost">Ghost</span> means
+    that ask has stayed cheapest for several sweeps without selling. <b>Spread</b> rows show
+    <span class="play">post <b>46</b> / <b>59</b></span> — place both orders and wait; the offer button
+    lowballs the cheapest seller at your buy price. <b>Set</b> rows list the parts to buy; copying a whisper
+    logs it and builds the reply-rate column. <b>Sells in</b> is how long the platinum is tied up — bid
+    filling, then ask selling — weighted by how much trade history backs it (hover for numbers);
+    <span class="tag warn" style="margin-left:0">▼ 30d</span> means it trades lower this week than this month.
+    Profit reflects your own results once you've closed trades. An item name opens warframe.market to confirm
+    the listing; <b>history</b> shows price history. Click a header to sort.
   </p>
   <div class="wrap"><table id="ops"><thead><tr>
     <th></th>
@@ -119,19 +118,18 @@
       <span class="unit">p of parts</span>
     </label>
     <label class="chk"><input type="checkbox" id="set-held"> show held back</label>
-    <button class="act" id="set-refresh">refresh</button>
+    <button class="act" data-refresh id="set-refresh">refresh</button>
     <span class="stat" id="set-count"></span>
   </div>
   <p class="hint">
-    Every set costed as its parts — each component bought from sellers you can reach right now, at
-    the quantity the set needs, working up the book when the cheapest seller holds too few — against
-    what the assembled set sells for. A part you cannot buy enough of marks the set <span class="tag bad" style="margin-left:0">short</span>
-    rather than pricing it. The set sells at the cheapest set ask less 1p, but
-    <span class="capped">never above where sets actually trade</span>: when sellers ask far more than
-    buyers pay, the set is priced at the traded median and the profit shrinks to match.
-    Click a row for its shopping list; copying a whisper logs it. Checklist progress is saved in
-    PlatWatch's database, and a half-bought set stays on Today until you mark it assembled or remove it. Volume is the slowest part's —
-    you can only assemble as fast as the rarest component sells.
+    Each set is costed as its parts — bought from reachable sellers at the quantity needed, working up the
+    book when the cheapest seller holds too few — against what the assembled set sells for. A part you
+    can't buy enough of marks the set <span class="tag bad" style="margin-left:0">short</span> instead of
+    pricing it. The set sells at the cheapest ask less 1p, <span class="capped">capped at the traded
+    median</span> when asks run far above what buyers actually pay, so profit shrinks to match. Click a row
+    for its shopping list; copying a whisper logs it. Checklist progress is saved, and a half-bought set
+    stays on Today until assembled or removed. Volume is the slowest part's — you can only assemble as fast
+    as the rarest component sells.
   </p>
   <div class="wrap"><table id="sets"><thead><tr>
     <th></th>
@@ -173,17 +171,16 @@
         <option value="low">any</option>
       </select>
     </label>
-    <button class="act" id="plan-refresh">refresh</button>
+    <button class="act" data-refresh id="plan-refresh">refresh</button>
   </div>
   <div class="plan-summary" id="plan-summary"></div>
   <details class="seller-routes" id="plan-routes" hidden><summary></summary><div class="route-grid"></div></details>
   <p class="hint">
-    A shortlist for the platinum you have, taken from the ranked trades in order until the budget
-    runs out. One trade per item, and no item takes more than the per-item limit — counting
-    anything you already hold in it. "Return per day" favours the small quick trade over a big
-    margin that sits for a week: it is profit over outlay, per expected day to sell. Expected
-    profit is the ranking's, adjusted by your own record for that strategy once you have closed
-    trades; low-confidence selling times are left out unless you ask for them.
+    A shortlist from the ranked trades, taken in order until your budget runs out — one trade per item,
+    capped at the per-item limit (counting what you already hold). "Return per day" favours a small quick
+    trade over a big margin that sits for a week: profit over outlay, per expected day to sell. Expected
+    profit is adjusted by your own record once you've closed trades; low-confidence selling times are
+    excluded unless requested.
   </p>
   <div class="wrap"><table id="plan"><thead><tr>
     <th class="r">#</th>
@@ -200,19 +197,18 @@
 <section id="tab-alerts" hidden>
   <div class="bar">
     <input type="search" id="alert-filter" placeholder="filter by name…">
-    <button class="act" id="alert-refresh">refresh</button>
+    <button class="act" data-refresh id="alert-refresh">refresh</button>
     <span class="stat" id="alert-performance"></span>
   </div>
   <p class="hint">
-    Fired by the live watcher against /v2/orders/recent, newest first. The trend compares the
-    last week's traded price with the last month's: a "bargain" in a falling market may simply
-    be the new price. Repeats of the same item at the same price fold under one row (×N), and
-    suspicious alerts stay collapsed until you ask to see them. Only an alert whose order is
-    still reachable — and, for a sell, still coverable by a reachable ask — is marked
-    <span class="tag good" style="margin-left:0">actionable</span>; the rest say
-    <span class="tag warn" style="margin-left:0">verify first</span>. Choosing bought or sold
-    records the trade on Trades &amp; P&amp;L in one step, and choosing it again never duplicates it.
-    An item name opens warframe.market in a new tab to confirm availability.
+    Fired by the live watcher, newest first. Trend compares last week's traded price to last month's —
+    a "bargain" in a falling market may just be the new price. Repeats fold into one row (×N); suspicious
+    alerts stay collapsed until asked for. An alert is
+    <span class="tag good" style="margin-left:0">actionable</span> only if its order — and, for a sell, a
+    covering ask — is still reachable; otherwise it says
+    <span class="tag warn" style="margin-left:0">verify first</span>. Choosing bought or sold records the
+    trade on Trades &amp; P&amp;L in one step and never duplicates on retry. An item name opens
+    warframe.market to confirm availability.
   </p>
   <div class="plan-skipped" id="alert-recommendations" hidden></div>
   <div class="wrap"><table id="alerts"><thead><tr>
@@ -250,11 +246,11 @@
 
 <section id="tab-log" hidden>
   <div class="bar">
-    <button class="act" id="log-refresh">refresh</button>
+    <button class="act" data-refresh id="log-refresh">refresh</button>
   </div>
   <p class="hint">
-    Every whisper you send. Recording whether someone replied is the one signal no
-    public tool has — after a few dozen trades it outperforms every freshness heuristic.
+    Every whisper you send. Reply tracking is the one signal no public tool has — after a few dozen
+    trades it beats any freshness heuristic.
   </p>
   <div class="wrap"><table id="log"><thead><tr>
     <th>Sent</th><th>Item</th><th>Player</th><th class="r">Plat</th><th>Outcome</th>
@@ -271,14 +267,13 @@
       <input type="number" id="duc-cap" min="0" step="1" placeholder="any">
       <span class="unit">p</span>
     </label>
-    <button class="act" id="duc-refresh">refresh</button>
+    <button class="act" data-refresh id="duc-refresh">refresh</button>
     <span class="stat" id="duc-plan"></span>
   </div>
   <p class="hint">
-    Prime parts convert to a fixed number of ducats whatever you paid, so only the
-    purchase price moves the rate. The blended figure is what a whole shopping run
-    actually returns — the top row alone always flatters it, because the cheapest
-    items are a few orders deep.
+    Ducats per part are fixed, so only price moves the rate. The blended figure is what a whole shopping
+    run actually returns — the top row alone flatters it, since the cheapest items are only a few orders
+    deep.
   </p>
   <div class="wrap"><table id="ducats"><thead><tr>
     <th data-sort="name">Item</th>
@@ -324,13 +319,12 @@
 <section id="tab-trades" hidden>
   <div class="bar" id="pnl-bar"></div>
   <p class="hint">
-    Every threshold in the ranking policy is a guess until these rows exist.
-    The calibration table below compares what the tool predicted against what you
-    actually realised — a ratio under 1 means it is optimistic and the filters need tightening.
-    That ratio also re-ranks the strategy, gently: ten closed trades move it halfway.
-    Open positions carry <b>exit signals</b> against their target — a buyer bidding it
-    (<span class="tag good" style="margin-left:0">Sell now</span>), asks listed under it, or a position sitting far longer than
-    expected — and the daemon sends each one as a notification when it first appears.
+    Every ranking threshold is a guess until these rows exist. The calibration table compares predicted
+    profit to what you actually realised — a ratio under 1 means the tool is optimistic. That ratio also
+    re-ranks the strategy, gently: ten closed trades move it halfway. Open positions carry
+    <b>exit signals</b> against their target — a buyer bidding it
+    (<span class="tag good" style="margin-left:0">Sell now</span>), asks listed under it, or a long overdue
+    sale — each sent as a notification the first time it appears.
   </p>
   <div class="wrap"><table id="calib"><thead><tr>
     <th>Strategy</th><th class="r">Closed</th>

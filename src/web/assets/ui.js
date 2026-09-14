@@ -12,7 +12,7 @@ for (const input of document.querySelectorAll('input[type="search"]')) {
   input.placeholder = 'Search items…';
 }
 document.getElementById('kind').setAttribute('aria-label', 'Trading strategy');
-for (const button of document.querySelectorAll('.bar > button.act')) button.textContent = '↻ Refresh';
+for (const button of document.querySelectorAll('button[data-refresh]')) button.textContent = '↻ Refresh';
 const viewDescriptions = {
   today: 'One queue for exits, unfinished purchases, and the best verified next trades.',
   ops: 'Find your next trade. Compare spreads, spot value, and put your platinum to work.',
@@ -1716,9 +1716,15 @@ async function fetchStatus() {
   $("#s-jobs").textContent = s.failingJobs ? `${s.failingJobs} failing` : `${s.jobs.length} healthy`;
   $("#s-backup").textContent = s.backup.lastSuccess ? new Date(s.backup.lastSuccess).toLocaleDateString([], { month:"short", day:"numeric" }) : "pending";
   const failed = s.jobs.filter((j) => j.consecutiveFailures > 0);
+  const sweep = s.jobs.find((j) => j.name === "sweep");
+  const sweepRunning = sweep?.lastAttempt && (!sweep.lastSuccess || Date.parse(sweep.lastAttempt) > Date.parse(sweep.lastSuccess));
+  $("#sweep-status").textContent = sweepRunning
+    ? "Refreshing market baseline"
+    : s.sweepAgeH === null ? "Waiting for first sweep" : `Baseline complete ${s.sweepAgeH}h ago`;
+  $("#sweep-status").dataset.state = sweepRunning ? "running" : s.sweepAgeH > 24 ? "stale" : "ready";
   $("#stale").textContent = failed.length
     ? `⚠ ${failed.map((j) => `${j.name}: ${j.lastError}`).join(" · ")}`
-    : s.sweepAgeH > 24 ? "⚠ baseline over a day old — re-run the sweep" : "";
+    : s.sweepAgeH > 24 && !sweepRunning ? "⚠ baseline over a day old" : "";
 }
 
 $("#backup-now").addEventListener("click", async (e) => {
@@ -1842,21 +1848,23 @@ async function fetchToday() {
   const next = plan.picks.slice(0, 5).map((row) => ({ type: "opportunity", row }));
   todayItems = [...urgent, ...unfinished, ...next];
   if (setList.length) renderSets();
-  $("#today-count").textContent = `${urgent.length} exits · ${unfinished.length} unfinished sets · ${next.length} next trades`;
+  $("#today-count").innerHTML = `<span class="queue-count"><b>${urgent.length}</b> exits</span> · <span class="queue-count"><b>${unfinished.length}</b> unfinished sets</span> · <span class="queue-count"><b>${next.length}</b> next trades`;
   const body = $("#today tbody");
   body.innerHTML = todayItems.length ? todayItems.map((item, i) => {
     const r = item.row;
-    if (item.type === "exit") return `<tr data-i="${i}"><td><span class="tag warn">position</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.quantity} held · ${fmtHeld(r.heldH)}</span></td><td>${esc(r.sellDecision.label)} · ${esc(r.sellDecision.detail)}</td><td><button class="act" data-today="trades">manage sale</button></td></tr>`;
+    const previous = i > 0 ? todayItems[i - 1].type : null;
+    const heading = previous === item.type ? "" : `<tr class="queue-heading"><th colspan="4">${item.type === "exit" ? "Sell or review positions" : item.type === "checklist" ? "Finish set purchases" : "Next verified trades"}</th></tr>`;
+    if (item.type === "exit") return heading + `<tr data-i="${i}"><td><span class="tag warn">position</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.quantity} held · ${fmtHeld(r.heldH)}</span></td><td>${esc(r.sellDecision.label)} · ${esc(r.sellDecision.detail)}</td><td><button class="act primary" data-today="trades">manage sale</button></td></tr>`;
     if (item.type === "checklist") {
       const c = item.checklist;
       const entries = r.parts?.length ? checklistEntries(r) : Object.keys(c.entries);
       const done = entries.filter((key) => checklistStatus(c.entries[key]) === "purchased").length;
-      return `<tr data-i="${i}" data-checklist="${esc(c.setItemId)}"><td><span class="tag">purchase</span></td>
+      return heading + `<tr data-i="${i}" data-checklist="${esc(c.setItemId)}"><td><span class="tag">purchase</span></td>
         <td>${marketLink(c.item_slug, c.name)}<span class="sub">${done}/${entries.length} purchases acquired${c.currentRow ? "" : " · no longer ranked"}</span></td>
         <td>${c.currentRow ? riskCell(c.currentRow) : '<span class="rate none">no longer a current opportunity — finish, assemble, or remove it</span>'}</td>
-        <td>${r.parts?.length ? '<button class="act" data-today="parts">continue checklist</button> ' : ""}<button class="act" data-today="assembled">mark assembled</button> <button class="act" data-today="remove">remove</button></td></tr>`;
+        <td>${r.parts?.length ? '<button class="act primary" data-today="parts">continue checklist</button> ' : ""}<button class="act" data-today="assembled">mark assembled</button> <button class="act" data-today="remove">remove</button></td></tr>`;
     }
-    return `<tr data-i="${i}"><td><span class="tag good">next trade</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.kind} · ${r.buyAt}p outlay</span></td><td>${riskCell(r)}</td><td><button class="act" data-today="verify">verify before buying</button></td></tr>`;
+    return heading + `<tr data-i="${i}"><td><span class="tag good">next trade</span></td><td>${marketLink(r.item_slug, r.name)}<span class="sub">${r.kind} · ${r.buyAt}p outlay</span></td><td>${riskCell(r)}</td><td><button class="act primary" data-today="verify">verify before buying</button></td></tr>`;
   }).join("") : '<tr><td colspan="4" class="empty">Nothing needs attention right now.</td></tr>';
 }
 
@@ -1887,6 +1895,7 @@ $("#today-refresh").addEventListener("click", loadToday);
 document.querySelector("nav").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
   if (!btn) return;
+  try { localStorage.setItem("pw:view", btn.dataset.tab); } catch {}
   for (const b of document.querySelectorAll("nav button")) {
     b.setAttribute("aria-selected", String(b === btn));
   }
@@ -1917,6 +1926,27 @@ $("#watched-only").addEventListener("change", loadOps);
 $("#filter").addEventListener("input", renderOps);
 $("#refresh").addEventListener("click", loadOps);
 
+// Keep the desk where the user left it, including the filters that shape a
+// repeated trading workflow. Invalid or unavailable values fall back to the
+// controls' existing defaults.
+const savedState = (key, fallback = "") => {
+  try { return localStorage.getItem("pw:" + key) ?? fallback; } catch { return fallback; }
+};
+const saveState = (key, value) => { try { localStorage.setItem("pw:" + key, value); } catch {} };
+const persistedInputs = [
+  ["kind", "value"], ["sort", "value"], ["capital", "value"], ["watched", "checked"],
+  ["filter", "value"], ["set-filter", "value"], ["set-sort", "value"], ["set-capital", "value"],
+  ["set-held", "checked"], ["alert-filter", "value"], ["plan-sort", "value"], ["plan-conf", "value"],
+];
+for (const [id, property] of persistedInputs) {
+  const input = $("#" + id);
+  if (!input) continue;
+  const key = "filter:" + id;
+  const stored = savedState(key);
+  if (stored !== "") input[property] = property === "checked" ? stored === "1" : stored;
+  input.addEventListener(property === "value" ? "input" : "change", () => saveState(key, property === "checked" ? (input.checked ? "1" : "0") : input.value));
+}
+
 // ── connection recovery ─────────────────────────────────────────────────────
 // When the daemon restarts, requests fail for a few seconds. Probe until it
 // answers, then clear the stale connection errors and refresh the open view —
@@ -1943,6 +1973,10 @@ connection.addEventListener("reconnected", () => {
   Promise.resolve(tabLoaders[activeTab()]?.()).catch(() => {});
 });
 
+const savedView = savedState("view", "today");
+const savedButton = document.querySelector(`nav button[data-tab="${CSS.escape(savedView)}"]`);
+if (savedButton) savedButton.click();
+else document.querySelector('nav button[data-tab="today"]').click();
 loadStatus();
 loadSettings().then(()=>{ $("#plan-budget").value=$("#setting-budget").value; $("#plan-cap").value=$("#setting-cap").value; $("#plan-reserve").value=$("#setting-reserve").value; $("#plan-group-cap").value=$("#setting-group-cap").value; $("#plan-conf").value=$("#setting-confidence").value; }).catch(() => {});
 loadOps();
